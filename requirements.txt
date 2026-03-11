@@ -1,0 +1,7 @@
+pyautogui==0.9.54
+pyperclip==1.8.2
+pynput==1.7.6
+pytesseract==0.3.10
+Pillow==10.0.0
+requests==2.31.0
+cryptography==41.0.0

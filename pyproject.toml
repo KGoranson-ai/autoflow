@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autoflow-engine"
+version = "0.1.0"
+description = "Human-like typing automation engine with configurable speed, pauses, and typo simulation."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+authors = [
+    { name = "AutoFlow Contributors" }
+]
+dependencies = [
+    "pyautogui",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+autoflow = "autoflow_engine.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autoflow_engine"]
