@@ -1,7 +1,17 @@
+# AutoFlow engine (desktop / library)
 pyautogui==0.9.54
 pyperclip==1.8.2
 pynput==1.7.6
 pytesseract==0.3.10
-Pillow==10.0.0
+Pillow>=11.0.0
 requests==2.31.0
-cryptography==41.0.0
+
+# Backend API (Flask / Railway)
+Flask==3.0.0
+flask-cors==4.0.0
+# PostgreSQL (psycopg v3; binary wheels for 3.11–3.13). Use psycopg2-binary on 3.12-only stacks if you need the v2 API.
+psycopg[binary]==3.2.4
+python-dotenv==1.0.0
+stripe==7.0.0
+cryptography==41.0.7
+gunicorn==21.2.0

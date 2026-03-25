@@ -5,6 +5,7 @@ Now with spreadsheet support for Excel and Google Sheets
 """
 
 import argparse
+import platform
 import sys
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
@@ -14,6 +15,7 @@ import random
 import threading
 import csv
 import io
+import json
 import os
 import re
 import unicodedata
@@ -39,6 +41,10 @@ except ImportError:
 
 # Max file size for OCR (10MB)
 OCR_MAX_FILE_BYTES = 10 * 1024 * 1024
+
+# Persistent user settings (~/.autoflow/settings.json)
+AUTOFLOW_DIR = os.path.join(os.path.expanduser("~"), ".autoflow")
+SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "settings.json")
 
 
 class OCREngine:
@@ -172,9 +178,51 @@ class SpreadsheetCalculator:
         return output.getvalue().strip()
 
 
+def _attach_tooltip(widget, text: str):
+    """Minimal hover tooltip for ttk widgets."""
+    tip = {"win": None}
+
+    def show(_event=None):
+        if tip["win"] is not None:
+            return
+        x = widget.winfo_rootx() + 20
+        y = widget.winfo_rooty() + widget.winfo_height() + 4
+        tw = tk.Toplevel(widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        lbl = tk.Label(
+            tw,
+            text=text,
+            justify=tk.LEFT,
+            background="#ffffe0",
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=("Arial", 9),
+            padx=6,
+            pady=4,
+        )
+        lbl.pack()
+        tip["win"] = tw
+
+    def hide(_event=None):
+        w = tip["win"]
+        tip["win"] = None
+        if w is not None:
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+
+    widget.bind("<Enter>", show)
+    widget.bind("<Leave>", hide)
+
+
 class AutoFlow:
     def __init__(self, root):
         self.root = root
+        self._is_mac = platform.system() == "Darwin"
+        self._mod = "Command" if self._is_mac else "Control"
+        self._status_flash_after_id = None
         self.root.title("AutoFlow v3.0 - Professional Workflow Automation")
         self.root.geometry("850x900")
         self.root.resizable(True, True)
@@ -198,9 +246,14 @@ class AutoFlow:
         
         # Auto-pause when window gains focus (user clicked AutoFlow window)
         self.root.bind('<FocusIn>', self.on_window_focus)
-        
-        # Create UI
+
+        self._loading_settings = False
+
+        # Create UI, then restore saved preferences
         self.create_ui()
+        self.load_settings()
+        self._setup_keyboard_shortcuts()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def create_ui(self):
         # Create a canvas with scrollbar for the entire interface
@@ -262,7 +315,7 @@ class AutoFlow:
             text="📝 Text Mode (Documents, emails, content)",
             variable=self.mode_var,
             value="text",
-            command=self.switch_mode
+            command=self._on_mode_changed
         )
         text_radio.grid(row=0, column=0, sticky=tk.W, pady=5, padx=5)
         
@@ -271,7 +324,7 @@ class AutoFlow:
             text="📊 Spreadsheet Mode (Excel, Google Sheets, CSV)",
             variable=self.mode_var,
             value="spreadsheet",
-            command=self.switch_mode
+            command=self._on_mode_changed
         )
         sheet_radio.grid(row=1, column=0, sticky=tk.W, pady=5, padx=5)
         
@@ -305,6 +358,8 @@ class AutoFlow:
             command=self.clear_text
         )
         self.clear_text_btn.pack(side=tk.LEFT, padx=(10, 0))
+        _clear_tip = f"{'⌘' if self._is_mac else 'Ctrl+'}K: Clear all text"
+        _attach_tooltip(self.clear_text_btn, _clear_tip)
 
         # Extract from Image (Pro) - only in text mode
         self.extract_image_btn = ttk.Button(
@@ -350,6 +405,7 @@ class AutoFlow:
             command=self.update_wpm_label
         )
         self.wpm_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.wpm_scale.bind("<ButtonRelease-1>", self._on_slider_released)
         
         self.wpm_label = ttk.Label(wpm_frame, text="50 WPM", width=10)
         self.wpm_label.pack(side=tk.LEFT, padx=(10, 0))
@@ -370,6 +426,7 @@ class AutoFlow:
             command=self.update_countdown_label
         )
         self.countdown_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.countdown_scale.bind("<ButtonRelease-1>", self._on_slider_released)
         
         self.countdown_label = ttk.Label(countdown_frame, text="5 seconds", width=10)
         self.countdown_label.pack(side=tk.LEFT, padx=(10, 0))
@@ -390,6 +447,7 @@ class AutoFlow:
             command=self.update_human_label
         )
         self.human_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.human_scale.bind("<ButtonRelease-1>", self._on_slider_released)
         
         self.human_label = ttk.Label(human_frame, text="Medium", width=10)
         self.human_label.pack(side=tk.LEFT, padx=(10, 0))
@@ -403,21 +461,24 @@ class AutoFlow:
             self.sheet_settings_frame,
             text="Navigate with Tab (moves right, then down)",
             variable=self.nav_var,
-            value="tab"
+            value="tab",
+            command=self._on_settings_changed,
         ).pack(anchor=tk.W, pady=2)
-        
+
         ttk.Radiobutton(
             self.sheet_settings_frame,
             text="Navigate with Enter (moves down, then right)",
             variable=self.nav_var,
-            value="enter"
+            value="enter",
+            command=self._on_settings_changed,
         ).pack(anchor=tk.W, pady=2)
 
         self.add_totals_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             self.sheet_settings_frame,
             text="☐ Add totals row (SUM formulas)",
-            variable=self.add_totals_var
+            variable=self.add_totals_var,
+            command=self._on_settings_changed,
         ).pack(anchor=tk.W, pady=2)
         
         # Options checkboxes
@@ -425,7 +486,8 @@ class AutoFlow:
         self.variation_check = ttk.Checkbutton(
             settings_frame,
             text="✓ Speed variation (faster and slower bursts)",
-            variable=self.variation_var
+            variable=self.variation_var,
+            command=self._on_settings_changed,
         )
         self.variation_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 2))
         
@@ -433,7 +495,8 @@ class AutoFlow:
         self.thinking_check = ttk.Checkbutton(
             settings_frame,
             text="✓ Thinking pauses (random hesitations while typing)",
-            variable=self.thinking_var
+            variable=self.thinking_var,
+            command=self._on_settings_changed,
         )
         self.thinking_check.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=2)
         
@@ -441,7 +504,8 @@ class AutoFlow:
         self.punctuation_check = ttk.Checkbutton(
             settings_frame,
             text="✓ Punctuation pauses (longer breaks after sentences)",
-            variable=self.punctuation_var
+            variable=self.punctuation_var,
+            command=self._on_settings_changed,
         )
         self.punctuation_check.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=2)
         
@@ -449,7 +513,8 @@ class AutoFlow:
         self.typos_check = ttk.Checkbutton(
             settings_frame,
             text="✓ Realistic typos & corrections (makes and fixes mistakes)",
-            variable=self.typos_var
+            variable=self.typos_var,
+            command=self._on_settings_changed,
         )
         self.typos_check.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
         
@@ -461,12 +526,14 @@ class AutoFlow:
         button_frame.columnconfigure(2, weight=1)
         button_frame.columnconfigure(3, weight=1)
         
+        _start_tip = "⌘+Enter: Start typing" if self._is_mac else "Ctrl+Enter: Start typing"
         self.start_button = ttk.Button(
             button_frame,
             text="▶ Start AutoFlow",
             command=self.start_typing
         )
         self.start_button.grid(row=0, column=0, padx=(0, 5), sticky=(tk.W, tk.E))
+        _attach_tooltip(self.start_button, _start_tip)
         
         self.pause_button = ttk.Button(
             button_frame,
@@ -507,7 +574,14 @@ class AutoFlow:
         instructions_frame = ttk.LabelFrame(main_frame, text="Quick Start", padding="10")
         instructions_frame.grid(row=7, column=0, sticky=(tk.W, tk.E))
         
-        self.instructions_text = """TEXT MODE: Paste your content (or use 📷 Extract from Image) → Click Start → Switch to target app
+        _sk = (
+            "⌘V Paste · ⌘K Clear · ⌘⏎ Start · ⌘Q Quit"
+            if self._is_mac
+            else "Ctrl+V Paste · Ctrl+K Clear · Ctrl+Enter Start · Ctrl+Q Quit"
+        )
+        self.instructions_text = f"""KEYBOARD: {_sk} (paste/clear/start shortcuts are off while AutoFlow is typing; quit always saves)
+
+TEXT MODE: Paste your content (or use 📷 Extract from Image) → Click Start → Switch to target app
 SPREADSHEET MODE: Paste CSV data → Click Start → Click first cell (A1)
 
 NOTE: Accented characters are automatically converted to plain text:
@@ -529,10 +603,200 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             font=("Arial", 9)
         )
         instructions_label.grid(row=0, column=0, sticky=tk.W)
-        
-        # Initialize in text mode
+
+    def _on_close(self):
+        """Persist settings and destroy the window."""
+        self.save_settings()
+        self.root.destroy()
+
+    def _flash_status(self, message: str, ms: int = 1800):
+        """Show a brief status message, then restore the previous line."""
+        if self._status_flash_after_id is not None:
+            try:
+                self.root.after_cancel(self._status_flash_after_id)
+            except tk.TclError:
+                pass
+        baseline = self.status_label.cget("text")
+        self.status_label.config(text=message)
+
+        def restore():
+            self._status_flash_after_id = None
+            self.status_label.config(text=baseline)
+
+        self._status_flash_after_id = self.root.after(ms, restore)
+
+    def _shortcut_paste_bindtag(self, event):
+        """Runs before Text class: block paste while automation is typing."""
+        if self.is_typing:
+            return "break"
+        return None
+
+    def _paste_event_block_if_typing(self, event):
+        """Block context-menu / programmatic paste while automation is typing."""
+        if self.is_typing:
+            return "break"
+        return None
+
+    def _shortcut_paste_root(self, event):
+        """Paste clipboard into the text box when focus is not on the text widget."""
+        if self.is_typing:
+            return "break"
+        if self.root.focus_get() == self.text_input:
+            return None
+        try:
+            clip = self.root.clipboard_get()
+        except tk.TclError:
+            clip = ""
+        self.text_input.focus_set()
+        self.text_input.insert(tk.INSERT, clip)
+        self.update_stats()
+        self._flash_status("Pasted from clipboard (shortcut)")
+        return "break"
+
+    def _shortcut_clear(self, event):
+        if self.is_typing:
+            return "break"
+        self.clear_text()
+        self._flash_status("Cleared text (shortcut)")
+        return "break"
+
+    def _shortcut_start(self, event):
+        if self.is_typing:
+            return "break"
+        if self.text_input.get("1.0", tk.END).strip():
+            self._flash_status("Starting… (shortcut)")
+        self.start_typing()
+        return "break"
+
+    def _shortcut_quit(self, event):
+        self._on_close()
+        return "break"
+
+    def _setup_keyboard_shortcuts(self):
+        """
+        Window-level shortcuts using the Command key on macOS and Control elsewhere.
+        text_input uses a leading bindtag so we can block paste during typing and
+        map Clear/Start without relying on focus being elsewhere.
+        """
+        m = self._mod
+        seq_v = f"<{m}-v>"
+        seq_k = f"<{m}-k>"
+        seq_ret = f"<{m}-Return>"
+        seq_q = f"<{m}-q>"
+
+        w = self.text_input
+        w.bindtags(("AutoFlowShortcuts",) + w.bindtags())
+
+        self.root.bind_class("AutoFlowShortcuts", seq_v, self._shortcut_paste_bindtag)
+        self.root.bind_class("AutoFlowShortcuts", "<<Paste>>", self._paste_event_block_if_typing)
+        self.root.bind_class("AutoFlowShortcuts", seq_k, self._shortcut_clear)
+        self.root.bind_class("AutoFlowShortcuts", seq_ret, self._shortcut_start)
+        self.root.bind_class("AutoFlowShortcuts", seq_q, self._shortcut_quit)
+
+        self.root.bind(seq_v, self._shortcut_paste_root)
+        self.root.bind(seq_k, self._shortcut_clear)
+        self.root.bind(seq_ret, self._shortcut_start)
+        self.root.bind(seq_q, self._shortcut_quit)
+
+    def _on_slider_released(self, event=None):
+        """Save after user releases a WPM / countdown / humanization slider."""
+        self._on_settings_changed()
+
+    def _on_mode_changed(self):
+        """Mode radio changed: update UI and persist."""
         self.switch_mode()
-        
+
+    def _on_settings_changed(self):
+        """Persist when any saved control changes (not during load)."""
+        if self._loading_settings:
+            return
+        self.save_settings()
+
+    def _clamp_int(self, value, lo, hi, default):
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(lo, min(hi, v))
+
+    def load_settings(self):
+        """Load ~/.autoflow/settings.json if present and apply to UI; else defaults."""
+        self._loading_settings = True
+        try:
+            data = {}
+            if os.path.isfile(SETTINGS_PATH):
+                try:
+                    with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    data = {}
+
+            wpm = self._clamp_int(data.get("wpm"), 30, 80, 50)
+            countdown = self._clamp_int(data.get("countdown"), 3, 10, 5)
+            human = self._clamp_int(data.get("humanization"), 1, 3, 2)
+
+            self.wpm_var.set(wpm)
+            self.countdown_var.set(countdown)
+            self.human_var.set(human)
+
+            self.variation_var.set(bool(data.get("variation", True)))
+            self.thinking_var.set(bool(data.get("thinking", True)))
+            self.punctuation_var.set(bool(data.get("punctuation", True)))
+            self.typos_var.set(bool(data.get("typos", True)))
+
+            mode = data.get("mode", "text")
+            if mode not in ("text", "spreadsheet"):
+                mode = "text"
+            self.mode_var.set(mode)
+
+            self.add_totals_var.set(bool(data.get("add_totals", False)))
+
+            nav = data.get("nav", "tab")
+            if nav not in ("tab", "enter"):
+                nav = "tab"
+            self.nav_var.set(nav)
+
+            geom = data.get("geometry")
+            if isinstance(geom, str) and geom.strip():
+                try:
+                    self.root.geometry(geom.strip())
+                except tk.TclError:
+                    pass
+
+            self.update_wpm_label(str(self.wpm_var.get()))
+            self.update_countdown_label(str(self.countdown_var.get()))
+            self.update_human_label(str(self.human_var.get()))
+
+            self.switch_mode()
+        finally:
+            self._loading_settings = False
+
+    def save_settings(self):
+        """Write current preferences and window geometry to settings.json."""
+        try:
+            os.makedirs(AUTOFLOW_DIR, mode=0o700, exist_ok=True)
+            payload = {
+                "wpm": int(self.wpm_var.get()),
+                "humanization": int(self.human_var.get()),
+                "variation": bool(self.variation_var.get()),
+                "thinking": bool(self.thinking_var.get()),
+                "punctuation": bool(self.punctuation_var.get()),
+                "typos": bool(self.typos_var.get()),
+                "mode": self.mode_var.get(),
+                "countdown": int(self.countdown_var.get()),
+                "add_totals": bool(self.add_totals_var.get()),
+                "nav": self.nav_var.get(),
+                "geometry": self.root.geometry(),
+            }
+            tmp_path = SETTINGS_PATH + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, SETTINGS_PATH)
+        except OSError:
+            pass
+
     def switch_mode(self):
         """Switch between text and spreadsheet mode"""
         mode = self.mode_var.get()
@@ -567,7 +831,10 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             self.text_input.delete("1.0", tk.END)
             self.text_input.insert("1.0", "Name,Age,City\nJohn,25,New York\nSarah,30,Los Angeles")
             self.update_stats()
-    
+
+        if not self._loading_settings:
+            self.save_settings()
+
     def import_csv(self):
         """Import CSV file"""
         filename = filedialog.askopenfilename(

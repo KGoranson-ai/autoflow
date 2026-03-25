@@ -283,16 +283,14 @@ class TypingEngine:
 
     def type_spreadsheet(self, rows: List[List[str]]) -> None:
         """
-        Type spreadsheet data cell by cell with Tab/Enter/Left navigation.
+        Type spreadsheet data cell by cell: pyautogui.write only, then Tab or Enter.
+        No clipboard, hotkeys, Cmd keys, or arrow keys — avoids macOS dictation
+        and shortcut side effects from synthetic modifier combinations.
         Uses should_stop / is_paused / on_status callables if provided.
         """
         pyautogui.PAUSE = 0
         cfg = self.config
-        wpm = cfg.wpm
         countdown = cfg.countdown_seconds
-        human_level = cfg.humanization_level
-        use_variation = cfg.speed_variation
-        use_thinking = cfg.thinking_pauses
 
         for i in range(countdown, 0, -1):
             if self._should_stop():
@@ -304,6 +302,9 @@ class TypingEngine:
             return
 
         total_cells = sum(len(row) for row in rows)
+        if total_cells == 0:
+            return
+
         cells_typed = 0
 
         for row_idx, row in enumerate(rows):
@@ -317,12 +318,6 @@ class TypingEngine:
                 cell_content = str(cell).strip()
                 if cell_content:
                     pyautogui.write(cell_content, interval=0.05)
-                    char_delay = self._get_char_delay(
-                        wpm, use_variation, human_level
-                    )
-                    total_delay = len(cell_content) * char_delay
-                    total_delay = max(total_delay, 0.2)
-                    time.sleep(total_delay)
 
                 cells_typed += 1
                 progress = int((cells_typed / total_cells) * 100)
@@ -337,17 +332,6 @@ class TypingEngine:
                 if not is_last_cell:
                     if col_idx < len(row) - 1:
                         pyautogui.press("tab")
-                        time.sleep(
-                            random.uniform(0.15, 0.35) * human_level
-                        )
                     else:
                         pyautogui.press("enter")
-                        if len(row) > 1:
-                            time.sleep(0.2)
-                            for _ in range(len(row) - 1):
-                                pyautogui.press("left")
-                                time.sleep(0.1)
-                        time.sleep(random.uniform(0.25, 0.55) * human_level)
-
-                if use_thinking and random.random() < 0.12:
-                    time.sleep(random.uniform(0.4, 0.9) * human_level)
+                    time.sleep(0.05)
