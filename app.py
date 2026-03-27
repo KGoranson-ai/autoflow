@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
-
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, current_app, jsonify, request
 from flask_cors import CORS
+from sqlalchemy.orm import sessionmaker
 
 from database import init_db, create_engine_from_env
+from license import validate_license
 
 load_dotenv()
 
@@ -45,6 +45,8 @@ def create_app() -> Flask:
     try:
         engine = create_engine_from_env()
         init_db(engine)
+        Session = sessionmaker(bind=engine)
+        app.config["db_session"] = Session
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
@@ -61,22 +63,42 @@ def create_app() -> Flask:
             "download_url": DEFAULT_DOWNLOAD_URL,
         }, 200
 
-    @app.post("/api/validate-license")
-    def validate_license() -> tuple[dict[str, Any], int]:
-        if not request.is_json:
-            return {"error": "Expected application/json"}, 400
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict):
-            return {"error": "Invalid JSON body"}, 400
-        key = data.get("license_key")
-        if key is None or not isinstance(key, str) or not key.strip():
-            return {"error": "license_key is required"}, 400
-        # Stub: real validation will check DB / Stripe / signed tokens
-        _ = os.environ.get("LICENSE_SALT", "")
-        return {
-            "valid": False,
-            "message": "License validation not configured (stub)",
-        }, 200
+    @app.route("/api/validate-license", methods=["POST"])
+    def api_validate_license():
+        try:
+            data = request.get_json()
+            if not data or "license_key" not in data:
+                return jsonify({"valid": False, "error": "Missing license_key"}), 400
+
+            license_key = data["license_key"]
+            ip_address = request.remote_addr
+
+            Session = current_app.config["db_session"]
+            session = Session()
+
+            try:
+                salt = os.environ.get("LICENSE_SALT", "")
+
+                result = validate_license(
+                    session=session,
+                    license_key=license_key,
+                    salt=salt,
+                    ip_address=ip_address,
+                )
+
+                session.commit()
+                return jsonify(result), 200
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"License validation error: {e}")
+                return jsonify({"valid": False, "error": "Validation failed"}), 500
+            finally:
+                session.close()
+
+        except Exception as e:
+            logger.error(f"Request error: {e}")
+            return jsonify({"valid": False, "error": "Invalid request"}), 400
 
     @app.errorhandler(404)
     def not_found(_e: Exception) -> tuple[dict[str, str], int]:
