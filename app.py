@@ -1,5 +1,5 @@
 """
-AutoFlow backend API — Flask application entrypoint for Railway (gunicorn app:app).
+Typestra backend API — Flask application entrypoint for Railway (gunicorn app:app).
 """
 
 from __future__ import annotations
@@ -12,13 +12,15 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from database import init_db, create_engine_from_env
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DOWNLOAD_URL = os.environ.get(
     "DOWNLOAD_URL",
-    "https://github.com/your-org/autoflow/releases/latest",
+    "https://typestra.com/download",
 )
 
 
@@ -30,7 +32,7 @@ def create_app() -> Flask:
     cors_origins = _parse_cors_origins(
         os.environ.get(
             "CORS_ORIGINS",
-            "https://autoflow.app,https://www.autoflow.app,http://localhost:3000,http://127.0.0.1:3000",
+            "https://typestra.com,https://www.typestra.com,http://localhost:3000,http://127.0.0.1:3000",
         )
     )
     CORS(
@@ -39,12 +41,21 @@ def create_app() -> Flask:
         supports_credentials=True,
     )
 
+    # Initialize database
+    try:
+        engine = create_engine_from_env()
+        init_db(engine)
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
         return {"status": "ok"}, 200
 
     @app.get("/api/version")
     def api_version() -> tuple[dict[str, str], int]:
+        """Return Typestra client version and download URL."""
         return {
             "version": "3.0.0",
             "download_url": DEFAULT_DOWNLOAD_URL,
@@ -85,7 +96,7 @@ def create_app() -> Flask:
 
 def _parse_cors_origins(raw: str) -> list[str]:
     parts = [p.strip() for p in raw.split(",") if p.strip()]
-    return parts or ["https://autoflow.app"]
+    return parts or ["https://typestra.com"]
 
 
 app = create_app()

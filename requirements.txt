@@ -11,6 +11,7 @@ Flask==3.0.0
 flask-cors==4.0.0
 # PostgreSQL (psycopg v3; binary wheels for 3.11–3.13). Use psycopg2-binary on 3.12-only stacks if you need the v2 API.
 psycopg[binary]==3.2.4
+SQLAlchemy>=2.0.36,<3
 python-dotenv==1.0.0
 stripe==7.0.0
 cryptography==41.0.7
