@@ -140,7 +140,12 @@ def create_engine_from_env(**kwargs: Any) -> Engine:
     raw = os.environ.get("DATABASE_URL")
     if not raw:
         raise ValueError("DATABASE_URL is not set")
-    return create_engine(normalize_database_url(raw), **kwargs)
+    return create_engine(
+        normalize_database_url(raw),
+        connect_args={"connect_timeout": 10},
+        pool_pre_ping=True,
+        **kwargs,
+    )
 
 
 def init_db(engine: Optional[Engine] = None, **engine_kwargs: Any) -> Engine:
