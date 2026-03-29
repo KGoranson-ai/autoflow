@@ -1,7 +1,7 @@
 """
 PostgreSQL schema and ORM for the Typestra license system.
 
-Uses SQLAlchemy 2.x with the psycopg3 driver (postgresql+psycopg://).
+Uses SQLAlchemy 2.x with the psycopg2 driver (postgresql+psycopg2://).
 """
 
 from __future__ import annotations
@@ -121,22 +121,17 @@ class LicenseValidation(Base):
 
 
 def normalize_database_url(url: str) -> str:
-    """
-    Normalize DATABASE_URL for SQLAlchemy + psycopg3.
-
-    Accepts postgres://, postgresql://, and postgresql+psycopg:// forms.
-    """
     if url.startswith("postgres://"):
         rest = url[len("postgres://") :]
-        return f"postgresql+psycopg://{rest}"
+        return f"postgresql+psycopg2://{rest}"
     if url.startswith("postgresql://"):
         rest = url[len("postgresql://") :]
-        return f"postgresql+psycopg://{rest}"
+        return f"postgresql+psycopg2://{rest}"
     return url
 
 
 def create_engine_from_env(**kwargs: Any) -> Engine:
-    """Build a SQLAlchemy engine using DATABASE_URL (psycopg3 driver)."""
+    """Build a SQLAlchemy engine using DATABASE_URL (psycopg2 driver)."""
     raw = os.environ.get("DATABASE_URL")
     if not raw:
         raise ValueError("DATABASE_URL is not set")

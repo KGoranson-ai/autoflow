@@ -9,8 +9,8 @@ requests==2.31.0
 # Backend API (Flask / Railway)
 Flask==3.0.0
 flask-cors==4.0.0
-# PostgreSQL (psycopg v3; binary wheels for 3.11–3.13). Use psycopg2-binary on 3.12-only stacks if you need the v2 API.
-psycopg[binary]==3.2.4
+# PostgreSQL (psycopg2; SQLAlchemy postgresql+psycopg2://).
+psycopg2-binary>=2.9.9
 SQLAlchemy>=2.0.36,<3
 python-dotenv==1.0.0
 stripe==7.0.0
