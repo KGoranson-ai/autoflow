@@ -142,7 +142,10 @@ def create_engine_from_env(**kwargs: Any) -> Engine:
         raise ValueError("DATABASE_URL is not set")
     return create_engine(
         normalize_database_url(raw),
-        connect_args={"connect_timeout": 10},
+        connect_args={
+            "connect_timeout": 10,
+            "sslmode": "require",
+        },
         pool_pre_ping=True,
         **kwargs,
     )
