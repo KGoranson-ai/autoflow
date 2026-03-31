@@ -41,15 +41,17 @@ def create_app() -> Flask:
         supports_credentials=True,
     )
 
-    # Initialize database
-    try:
-        engine = create_engine_from_env()
-        init_db(engine)
-        Session = sessionmaker(bind=engine)
-        app.config["db_session"] = Session
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+    # Lazy DB init — runs after worker is up, not at import time
+    @app.before_request
+    def ensure_db():
+        if "db_session" not in app.config:
+            try:
+                engine = create_engine_from_env()
+                init_db(engine)
+                app.config["db_session"] = sessionmaker(bind=engine)
+                logger.info("Database initialized successfully")
+            except Exception as e:
+                logger.error(f"Database initialization failed: {e}")
 
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
