@@ -139,8 +139,6 @@ def create_engine_from_env(**kwargs: Any) -> Engine:
         normalize_database_url(raw),
         connect_args={
             "connect_timeout": 10,
-            "sslmode": "require",
-            "sslrootcert": "disable",
         },
         pool_pre_ping=True,
         **kwargs,
