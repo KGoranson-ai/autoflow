@@ -40,6 +40,8 @@ def create_app() -> Flask:
         app,
         resources={r"/api/*": {"origins": cors_origins}},
         supports_credentials=True,
+        methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization"],
     )
 
     # Lazy DB init — runs after worker is up, not at import time
