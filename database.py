@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, create_engine, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, create_engine, func
 from sqlalchemy.dialects.postgresql import ENUM, UUID
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -118,6 +118,62 @@ class LicenseValidation(Base):
         server_default=func.now(),
     )
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+
+
+class Affiliate(Base):
+    __tablename__ = "affiliates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    ref_code: Mapped[str] = mapped_column(String(8), unique=True, nullable=False, index=True)
+    discount_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    commission_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    stripe_connect_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    payout_email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class Referral(Base):
+    __tablename__ = "referrals"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    affiliate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("affiliates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    customer_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    commission_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    discount_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    monthly_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    commission_ends_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    self_referral_attempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 def normalize_database_url(url: str) -> str:

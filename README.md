@@ -1,10 +1,10 @@
-# autoflow-engine
+# Typestra
 
-Human-like typing simulation for AI agents, browser automation, and desktop workflows.
+Human-like typing simulation for AI agents, browser automation, and desktop workflows. The Python package is published on PyPI as `autoflow-engine`.
 
-## Why AutoFlow
+## Why Typestra
 
-Automation that types at fixed speed or pastes in one shot is easy to detect and often blocked. Real users vary speed, pause after punctuation, hesitate, and make occasional typos they correct. AutoFlow simulates that behavior so automated typing blends in and works where naive automation fails.
+Automation that types at fixed speed or pastes in one shot is easy to detect and often blocked. Real users vary speed, pause after punctuation, hesitate, and make occasional typos they correct. Typestra simulates that behavior so automated typing blends in and works where naive automation fails.
 
 ## Features
 
@@ -102,7 +102,7 @@ gunicorn app:app --bind 127.0.0.1:5001
 | `SECRET_KEY` | Flask session / signing |
 | `LICENSE_SALT` | Salt for license material (future validation) |
 | `DOWNLOAD_URL` | URL returned by `GET /api/version` |
-| `CORS_ORIGINS` | Comma-separated allowed origins (defaults include `https://autoflow.app` and local dev) |
+| `CORS_ORIGINS` | Comma-separated allowed origins (defaults include `https://typestra.com` and local dev) |
 | `PORT` | Listen port (set automatically on Railway) |
 
 Dependencies use **`psycopg[binary]`** (Psycopg 3) so installs work on Python 3.11–3.13. If you standardize on Python 3.12 and prefer the older driver, you can swap that line in `requirements.txt` for `psycopg2-binary==2.9.9`.

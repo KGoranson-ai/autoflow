@@ -6,14 +6,16 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import resend
 import stripe
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from flask import Flask, current_app, jsonify, request
 from flask_cors import CORS
 from sqlalchemy.orm import sessionmaker
 
-from database import init_db, create_engine_from_env
+from database import Affiliate, Referral, init_db, create_engine_from_env
 from license import validate_license
 
 load_dotenv()
@@ -111,6 +113,7 @@ def create_app() -> Flask:
         try:
             data = request.get_json()
             tier = data.get("tier")
+            ref_code = data.get("ref_code")
             price_map = {
                 "basic": os.environ.get("STRIPE_PRICE_BASIC"),
                 "pro": os.environ.get("STRIPE_PRICE_PRO"),
@@ -120,12 +123,43 @@ def create_app() -> Flask:
             if not price_id:
                 return jsonify({"error": "Invalid tier"}), 400
 
+            discount_percent = 0
+            if ref_code:
+                try:
+                    from sqlalchemy import select
+                    db_session = current_app.config.get("db_session")
+                    if db_session:
+                        s = db_session()
+                        try:
+                            affiliate = s.execute(
+                                select(Affiliate).where(
+                                    Affiliate.ref_code == ref_code,
+                                    Affiliate.status == "active"
+                                )
+                            ).scalar_one_or_none()
+                            if affiliate:
+                                discount_percent = affiliate.discount_percent
+                        finally:
+                            s.close()
+                except Exception as e:
+                    logger.error(f"Ref code lookup error: {e}")
+
+            discounts = []
+            if discount_percent > 0:
+                stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+                coupon = stripe.Coupon.create(
+                    percent_off=discount_percent,
+                    duration="once",
+                )
+                discounts = [{"coupon": coupon.id}]
+
             stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
                 line_items=[{"price": price_id, "quantity": 1}],
                 mode="subscription",
-                metadata={"tier": tier},
+                metadata={"tier": tier, "ref_code": ref_code or ""},
+                discounts=discounts if discounts else None,
                 success_url="https://typestra.com/download?session_id={CHECKOUT_SESSION_ID}",
                 cancel_url="https://typestra.com/pricing",
             )
@@ -153,10 +187,12 @@ def create_app() -> Flask:
             stripe_customer_id = session_data.get("customer")
             stripe_subscription_id = session_data.get("subscription")
             tier = session_data.get("metadata", {}).get("tier", "basic")
+            ref_code = session_data.get("metadata", {}).get("ref_code")
+            amount_total = session_data.get("amount_total", 0)
 
             try:
                 from license import create_subscription
-
+                from sqlalchemy import select
                 db_session = current_app.config.get("db_session")
                 if db_session:
                     s = db_session()
@@ -171,31 +207,58 @@ def create_app() -> Flask:
                         s.commit()
                         license_key = result["license_key"]
 
+                        # Handle referral tracking
+                        if ref_code:
+                            affiliate = s.execute(
+                                select(Affiliate).where(
+                                    Affiliate.ref_code == ref_code,
+                                    Affiliate.status == "active"
+                                )
+                            ).scalar_one_or_none()
+
+                            if affiliate:
+                                is_self_referral = affiliate.email.lower() == (email or "").lower()
+                                referral = Referral(
+                                    affiliate_id=affiliate.id,
+                                    customer_email=email,
+                                    stripe_subscription_id=stripe_subscription_id,
+                                    stripe_customer_id=stripe_customer_id,
+                                    commission_percent=affiliate.commission_percent,
+                                    discount_percent=affiliate.discount_percent,
+                                    monthly_amount=amount_total,
+                                    commission_ends_at=datetime.now(timezone.utc) + timedelta(days=180),
+                                    self_referral_attempt=is_self_referral,
+                                )
+                                s.add(referral)
+                                s.commit()
+                                if is_self_referral:
+                                    logger.warning(f"Self-referral attempt blocked: {email} used own ref code {ref_code}")
+                                else:
+                                    logger.info(f"Referral tracked: {email} via {ref_code}")
+
                         resend.api_key = os.environ.get("RESEND_API_KEY")
-                        resend.Emails.send(
-                            {
-                                "from": "Typestra <noreply@typestra.com>",
-                                "to": [email],
-                                "subject": "Your Typestra License Key",
-                                "html": f"""
-                        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-                            <h2>Welcome to Typestra!</h2>
-                            <p>Thank you for your purchase. Here is your license key:</p>
-                            <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 24px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px;">
-                                {license_key}
+                        resend.Emails.send({
+                            "from": "Typestra <noreply@typestra.com>",
+                            "to": [email],
+                            "subject": "Your Typestra License Key",
+                            "html": f"""
+                            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+                                <h2>Welcome to Typestra!</h2>
+                                <p>Thank you for your purchase. Here is your license key:</p>
+                                <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 24px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px;">
+                                    {license_key}
+                                </div>
+                                <p>To activate:</p>
+                                <ol>
+                                    <li>Download Typestra at <a href="https://typestra.com/download">typestra.com/download</a></li>
+                                    <li>Open the app and click Activate</li>
+                                    <li>Enter your license key</li>
+                                </ol>
+                                <p>Keep this email — you'll need the key if you reinstall.</p>
+                                <p>Questions? Reply to this email or contact support@typestra.com</p>
                             </div>
-                            <p>To activate:</p>
-                            <ol>
-                                <li>Download Typestra at <a href="https://typestra.com/download">typestra.com/download</a></li>
-                                <li>Open the app and click Activate</li>
-                                <li>Enter your license key</li>
-                            </ol>
-                            <p>Keep this email -- you'll need the key if you reinstall.</p>
-                            <p>Questions? Reply to this email or contact support@typestra.com</p>
-                        </div>
-                        """,
-                            }
-                        )
+                            """
+                        })
                         logger.info(f"License created and emailed to {email}")
                     except Exception as e:
                         s.rollback()
@@ -255,6 +318,194 @@ def create_app() -> Flask:
         except Exception as e:
             logger.error(f"Cancel request error: {e}")
             return jsonify({"error": "Invalid request"}), 400
+
+    @app.route("/api/affiliate/apply", methods=["POST"])
+    def affiliate_apply():
+        try:
+            data = request.get_json()
+            name = data.get("name", "").strip()
+            email = data.get("email", "").strip().lower()
+            notes = data.get("notes", "").strip()
+
+            if not name or not email or "@" not in email:
+                return jsonify({"error": "Name and valid email are required"}), 400
+
+            db_session = current_app.config.get("db_session")
+            if not db_session:
+                return jsonify({"error": "Service unavailable"}), 503
+            s = db_session()
+            try:
+                from sqlalchemy import select
+
+                existing = s.execute(
+                    select(Affiliate).where(Affiliate.email == email)
+                ).scalar_one_or_none()
+                if existing:
+                    return (
+                        jsonify({"error": "An application with this email already exists"}),
+                        409,
+                    )
+
+                ref_code = secrets.token_urlsafe(6)[:8].upper()
+                affiliate = Affiliate(
+                    name=name,
+                    email=email,
+                    ref_code=ref_code,
+                    status="pending",
+                    notes=notes,
+                )
+                s.add(affiliate)
+                s.commit()
+
+                resend.api_key = os.environ.get("RESEND_API_KEY")
+                resend.Emails.send(
+                    {
+                        "from": "Typestra <noreply@typestra.com>",
+                        "to": [email],
+                        "subject": "Typestra Affiliate Application Received",
+                        "html": f"""
+                <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2>Thanks for applying, {name}!</h2>
+                    <p>We've received your affiliate application for Typestra. We review applications manually and will get back to you within 2-3 business days.</p>
+                    <p>Questions? Reply to this email or contact support@typestra.com.</p>
+                </div>
+                """,
+                    }
+                )
+
+                return jsonify({"status": "applied"}), 200
+            except Exception as e:
+                s.rollback()
+                logger.error(f"Affiliate apply error: {e}")
+                return jsonify({"error": "Application failed"}), 500
+            finally:
+                s.close()
+        except Exception as e:
+            logger.error(f"Affiliate apply request error: {e}")
+            return jsonify({"error": "Invalid request"}), 400
+
+    @app.route("/api/admin/affiliate/approve", methods=["POST"])
+    def admin_affiliate_approve():
+        admin_secret = request.headers.get("X-Admin-Secret")
+        if admin_secret != os.environ.get("ADMIN_SECRET"):
+            return jsonify({"error": "Unauthorized"}), 401
+
+        data = request.get_json()
+        email = data.get("email", "").strip().lower()
+        discount_percent = data.get("discount_percent", 10)
+        commission_percent = data.get("commission_percent", 50)
+        payout_email = data.get("payout_email", email)
+
+        if not email:
+            return jsonify({"error": "Email required"}), 400
+
+        db_session = current_app.config.get("db_session")
+        s = db_session()
+        try:
+            from sqlalchemy import select
+
+            affiliate = s.execute(
+                select(Affiliate).where(Affiliate.email == email)
+            ).scalar_one_or_none()
+            if not affiliate:
+                return jsonify({"error": "Affiliate not found"}), 404
+
+            affiliate.status = "active"
+            affiliate.discount_percent = discount_percent
+            affiliate.commission_percent = commission_percent
+            affiliate.payout_email = payout_email
+            s.commit()
+
+            resend.api_key = os.environ.get("RESEND_API_KEY")
+            resend.Emails.send(
+                {
+                    "from": "Typestra <noreply@typestra.com>",
+                    "to": [affiliate.email],
+                    "subject": "You're approved — Typestra Affiliate Program",
+                    "html": f"""
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2>Welcome to the Typestra Affiliate Program, {affiliate.name}!</h2>
+                <p>Your application has been approved. Here are your details:</p>
+                <ul>
+                    <li><strong>Your referral link:</strong> https://typestra.com/?ref={affiliate.ref_code}</li>
+                    <li><strong>Customer discount:</strong> {affiliate.discount_percent}% off</li>
+                    <li><strong>Your commission:</strong> {affiliate.commission_percent}% recurring for 6 months per sale</li>
+                </ul>
+                <p>Share your link with your audience. When someone clicks it and subscribes, they get {affiliate.discount_percent}% off and you earn {affiliate.commission_percent}% of their monthly payment for 6 months.</p>
+                <p><strong>Important:</strong> Using your own referral link to purchase a subscription is not permitted and will result in termination from the program.</p>
+                <p>Questions? Email support@typestra.com.</p>
+            </div>
+            """,
+                }
+            )
+
+            return (
+                jsonify(
+                    {
+                        "status": "approved",
+                        "ref_code": affiliate.ref_code,
+                        "referral_link": f"https://typestra.com/?ref={affiliate.ref_code}",
+                        "discount_percent": affiliate.discount_percent,
+                        "commission_percent": affiliate.commission_percent,
+                    }
+                ),
+                200,
+            )
+        except Exception as e:
+            s.rollback()
+            logger.error(f"Affiliate approve error: {e}")
+            return jsonify({"error": "Approval failed"}), 500
+        finally:
+            s.close()
+
+    @app.route("/api/admin/affiliates", methods=["GET"])
+    def admin_affiliates():
+        admin_secret = request.headers.get("X-Admin-Secret")
+        if admin_secret != os.environ.get("ADMIN_SECRET"):
+            return jsonify({"error": "Unauthorized"}), 401
+
+        db_session = current_app.config.get("db_session")
+        s = db_session()
+        try:
+            from sqlalchemy import select
+
+            affiliates = s.execute(select(Affiliate)).scalars().all()
+            result = []
+            for a in affiliates:
+                referrals = s.execute(
+                    select(Referral).where(Referral.affiliate_id == a.id)
+                ).scalars().all()
+                active_referrals = [
+                    r
+                    for r in referrals
+                    if r.commission_ends_at > datetime.now(timezone.utc)
+                ]
+                total_commission = sum(
+                    (r.monthly_amount * r.commission_percent / 100) for r in active_referrals
+                )
+                result.append(
+                    {
+                        "id": str(a.id),
+                        "name": a.name,
+                        "email": a.email,
+                        "ref_code": a.ref_code,
+                        "referral_link": f"https://typestra.com/?ref={a.ref_code}",
+                        "status": a.status,
+                        "discount_percent": a.discount_percent,
+                        "commission_percent": a.commission_percent,
+                        "payout_email": a.payout_email,
+                        "total_referrals": len(referrals),
+                        "active_referrals": len(active_referrals),
+                        "monthly_commission_owed": round(total_commission / 100, 2),
+                        "created_at": a.created_at.isoformat(),
+                    }
+                )
+            return jsonify(result), 200
+        except Exception as e:
+            logger.error(f"Affiliates list error: {e}")
+            return jsonify({"error": "Failed to fetch affiliates"}), 500
+        finally:
+            s.close()
 
     @app.errorhandler(404)
     def not_found(_e: Exception) -> tuple[dict[str, str], int]:
