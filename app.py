@@ -207,6 +207,55 @@ def create_app() -> Flask:
 
         return jsonify({"status": "ok"}), 200
 
+    @app.route("/api/admin/cancel-license", methods=["POST"])
+    def admin_cancel_license():
+        admin_secret = request.headers.get("X-Admin-Secret")
+        if admin_secret != os.environ.get("ADMIN_SECRET"):
+            return jsonify({"error": "Unauthorized"}), 401
+
+        data = request.get_json()
+        license_key = data.get("license_key")
+        if not license_key:
+            return jsonify({"error": "Missing license_key"}), 400
+
+        try:
+            from license import hash_license_key
+
+            salt = os.environ.get("LICENSE_SALT", "")
+            key_hash = hash_license_key(license_key, salt)
+
+            db_session = current_app.config.get("db_session")
+            s = db_session()
+            try:
+                from sqlalchemy import select
+                from database import Subscription
+
+                sub = s.execute(
+                    select(Subscription).where(Subscription.license_key_hash == key_hash)
+                ).scalar_one_or_none()
+
+                if not sub:
+                    return jsonify({"error": "License not found"}), 404
+
+                sub.status = "cancelled"
+
+                if sub.stripe_subscription_id:
+                    stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+                    stripe.Subscription.cancel(sub.stripe_subscription_id)
+
+                s.commit()
+                logger.info(f"License cancelled: {key_hash[:8]}...")
+                return jsonify({"status": "cancelled"}), 200
+            except Exception as e:
+                s.rollback()
+                logger.error(f"Cancel error: {e}")
+                return jsonify({"error": "Failed to cancel"}), 500
+            finally:
+                s.close()
+        except Exception as e:
+            logger.error(f"Cancel request error: {e}")
+            return jsonify({"error": "Invalid request"}), 400
+
     @app.errorhandler(404)
     def not_found(_e: Exception) -> tuple[dict[str, str], int]:
         return {"error": "Not found"}, 404
