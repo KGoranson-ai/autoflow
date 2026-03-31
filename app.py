@@ -58,6 +58,16 @@ def create_app() -> Flask:
     def health() -> tuple[dict[str, str], int]:
         return {"status": "ok"}, 200
 
+    @app.get("/debug/env")
+    def debug_env():
+        return jsonify(
+            {
+                "STRIPE_PRICE_PRO": os.environ.get("STRIPE_PRICE_PRO", "NOT SET"),
+                "STRIPE_SECRET_KEY": os.environ.get("STRIPE_SECRET_KEY", "NOT SET")[:8]
+                + "...",
+            }
+        ), 200
+
     @app.get("/api/version")
     def api_version() -> tuple[dict[str, str], int]:
         """Return Typestra client version and download URL."""
