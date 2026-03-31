@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stripe
 from dotenv import load_dotenv
 from flask import Flask, current_app, jsonify, request
 from flask_cors import CORS
@@ -101,6 +102,33 @@ def create_app() -> Flask:
         except Exception as e:
             logger.error(f"Request error: {e}")
             return jsonify({"valid": False, "error": "Invalid request"}), 400
+
+    @app.route("/api/create-checkout-session", methods=["POST"])
+    def create_checkout_session():
+        try:
+            data = request.get_json()
+            tier = data.get("tier")
+            price_map = {
+                "basic": os.environ.get("STRIPE_PRICE_BASIC"),
+                "pro": os.environ.get("STRIPE_PRICE_PRO"),
+                "premium": os.environ.get("STRIPE_PRICE_PREMIUM"),
+            }
+            price_id = price_map.get(tier)
+            if not price_id:
+                return jsonify({"error": "Invalid tier"}), 400
+
+            stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+            session = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{"price": price_id, "quantity": 1}],
+                mode="subscription",
+                success_url="https://typestra.com/download?session_id={CHECKOUT_SESSION_ID}",
+                cancel_url="https://typestra.com/pricing",
+            )
+            return jsonify({"url": session.url}), 200
+        except Exception as e:
+            logger.error(f"Checkout session error: {e}")
+            return jsonify({"error": "Failed to create checkout session"}), 500
 
     @app.errorhandler(404)
     def not_found(_e: Exception) -> tuple[dict[str, str], int]:
