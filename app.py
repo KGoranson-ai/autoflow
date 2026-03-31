@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import resend
 import stripe
 from dotenv import load_dotenv
 from flask import Flask, current_app, jsonify, request
@@ -124,6 +125,7 @@ def create_app() -> Flask:
                 payment_method_types=["card"],
                 line_items=[{"price": price_id, "quantity": 1}],
                 mode="subscription",
+                metadata={"tier": tier},
                 success_url="https://typestra.com/download?session_id={CHECKOUT_SESSION_ID}",
                 cancel_url="https://typestra.com/pricing",
             )
@@ -131,6 +133,79 @@ def create_app() -> Flask:
         except Exception as e:
             logger.error(f"Checkout session error: {e}")
             return jsonify({"error": "Failed to create checkout session"}), 500
+
+    @app.route("/api/webhook/stripe", methods=["POST"])
+    def stripe_webhook():
+        payload = request.get_data()
+        sig_header = request.headers.get("Stripe-Signature")
+        webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
+
+        try:
+            stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+            event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+        except Exception as e:
+            logger.error(f"Webhook signature error: {e}")
+            return jsonify({"error": "Invalid signature"}), 400
+
+        if event["type"] == "checkout.session.completed":
+            session_data = event["data"]["object"]
+            email = session_data.get("customer_details", {}).get("email")
+            stripe_customer_id = session_data.get("customer")
+            stripe_subscription_id = session_data.get("subscription")
+            tier = session_data.get("metadata", {}).get("tier", "basic")
+
+            try:
+                from license import create_subscription
+
+                db_session = current_app.config.get("db_session")
+                if db_session:
+                    s = db_session()
+                    try:
+                        result = create_subscription(
+                            session=s,
+                            email=email,
+                            tier=tier,
+                            stripe_customer_id=stripe_customer_id,
+                            stripe_subscription_id=stripe_subscription_id,
+                        )
+                        s.commit()
+                        license_key = result["license_key"]
+
+                        resend.api_key = os.environ.get("RESEND_API_KEY")
+                        resend.Emails.send(
+                            {
+                                "from": "Typestra <noreply@typestra.com>",
+                                "to": [email],
+                                "subject": "Your Typestra License Key",
+                                "html": f"""
+                        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+                            <h2>Welcome to Typestra!</h2>
+                            <p>Thank you for your purchase. Here is your license key:</p>
+                            <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 24px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px;">
+                                {license_key}
+                            </div>
+                            <p>To activate:</p>
+                            <ol>
+                                <li>Download Typestra at <a href="https://typestra.com/download">typestra.com/download</a></li>
+                                <li>Open the app and click Activate</li>
+                                <li>Enter your license key</li>
+                            </ol>
+                            <p>Keep this email -- you'll need the key if you reinstall.</p>
+                            <p>Questions? Reply to this email or contact support@typestra.com</p>
+                        </div>
+                        """,
+                            }
+                        )
+                        logger.info(f"License created and emailed to {email}")
+                    except Exception as e:
+                        s.rollback()
+                        logger.error(f"Failed to create subscription or send email: {e}")
+                    finally:
+                        s.close()
+            except Exception as e:
+                logger.error(f"Webhook processing error: {e}")
+
+        return jsonify({"status": "ok"}), 200
 
     @app.errorhandler(404)
     def not_found(_e: Exception) -> tuple[dict[str, str], int]:
