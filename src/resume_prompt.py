@@ -23,6 +23,9 @@ class ResumePrompt:
         )
 
     def check_for_interrupted_session(self) -> Optional[Dict[str, Any]]:
+        # Note: Recovery file is deleted after showing prompt regardless
+        # of user choice. This prevents repeated prompts on every startup.
+        # If user discards, they can't resume later (intentional).
         if not os.path.exists(self.recovery_file):
             return None
         try:
@@ -69,6 +72,18 @@ class ResumePrompt:
             text=f"Batch: {csv_filename}",
             font=("Helvetica", 10),
         ).pack(anchor="w", padx=20)
+        csv_full_path = saved_state.get("csv_file", "Unknown")
+        home = os.path.expanduser("~")
+        if csv_full_path.startswith(home):
+            display_path = csv_full_path.replace(home, "~", 1)
+        else:
+            display_path = csv_full_path
+        ttk.Label(
+            details_frame,
+            text=f"Source: {display_path}",
+            font=("Helvetica", 9),
+            foreground="gray",
+        ).pack(anchor="w", padx=20)
         ttk.Label(
             details_frame,
             text=f"Progress: {saved_state['current_row']} / {saved_state['total_rows']} rows completed",
@@ -85,9 +100,15 @@ class ResumePrompt:
 
         ttk.Label(
             dialog,
-            text="Would you like to resume?",
+            text="Would you like to resume where you left off?",
             font=("Helvetica", 11, "bold"),
-        ).pack(pady=20)
+        ).pack(pady=10)
+        ttk.Label(
+            dialog,
+            text="(Discarding will permanently clear this recovery state)",
+            font=("Helvetica", 9),
+            foreground="gray",
+        ).pack(pady=(0, 15))
 
         button_frame = ttk.Frame(dialog)
         button_frame.pack(pady=20)
@@ -102,7 +123,7 @@ class ResumePrompt:
             dialog.destroy()
 
         ttk.Button(
-            button_frame, text="Discard", command=discard, width=15
+            button_frame, text="Discard & Start Fresh", command=discard, width=20
         ).pack(side="left", padx=5)
         ttk.Button(
             button_frame,

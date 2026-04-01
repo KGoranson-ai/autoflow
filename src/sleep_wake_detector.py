@@ -30,16 +30,15 @@ class SleepWakeDetector:
             self.start_monitoring()
 
     def start_monitoring(self):
+        """Start background thread to monitor for wake events."""
         self.monitoring = True
 
         def monitor_loop():
             while self.monitoring:
                 current_uptime = self.get_system_uptime()
-                # Requested approach: detect if uptime drops.
-                wake_detected = current_uptime < self.last_uptime
-                # Practical fallback: large poll gap typically means sleep/wake.
-                gap_detected = (current_uptime - self.last_uptime) > 20
-                if wake_detected or gap_detected:
+                # Wake/reboot detected only when uptime unexpectedly moves backward.
+                # Use a tolerance to avoid jitter-related false positives.
+                if current_uptime < (self.last_uptime - 30):
                     for callback in self.wake_callbacks:
                         try:
                             callback()

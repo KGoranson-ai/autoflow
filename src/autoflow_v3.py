@@ -1376,13 +1376,24 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         csv_file = saved_state.get("csv_file", "")
         if not csv_file:
             return False
+        if not os.path.exists(csv_file):
+            messagebox.showerror(
+                "Resume Failed",
+                f"CSV file not found:\n{csv_file}\n\n"
+                "The file may have been moved or deleted.\n"
+                "Recovery state has been cleared.",
+            )
+            ResumePrompt().delete_recovery_file()
+            return False
         session = SmartFillSession()
         result = session.load_csv(csv_file)
         if not result.get("success"):
             messagebox.showerror(
                 "Resume Failed",
-                f"Could not reload CSV file:\n{csv_file}",
+                f"Could not reload CSV file:\n{csv_file}\n\n"
+                f"Error: {result.get('error', 'Unknown error')}",
             )
+            ResumePrompt().delete_recovery_file()
             return False
 
         session.field_mappings = saved_state.get("field_mappings", [])

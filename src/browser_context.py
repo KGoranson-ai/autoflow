@@ -4,12 +4,15 @@ Browser/app context capture and verification helpers.
 
 from __future__ import annotations
 
+import logging
 import platform
 import subprocess
 from datetime import datetime
 from typing import Any, Dict
 
 from tkinter import messagebox
+
+logger = logging.getLogger(__name__)
 
 
 class BrowserContext:
@@ -73,25 +76,56 @@ class BrowserContext:
         )
         return result.stdout.strip()
 
-    def get_browser_url(self, app_name: str) -> str:
-        if app_name == "Safari":
-            script = 'tell application "Safari" to get URL of front document'
-        elif app_name in {"Google Chrome", "Brave Browser"}:
-            script = f'tell application "{app_name}" to get URL of active tab of front window'
-        else:
-            return ""
+    def get_browser_url(self, app_name: str = ""):
+        """
+        Get current URL via AppleScript.
 
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, check=False
-        )
-        return result.stdout.strip()
+        Returns: URL string or None if failed.
+        """
+        browser_type = self.get_browser_type()
+        try:
+            if browser_type == "safari":
+                script = 'tell application "Safari" to get URL of front document'
+            elif browser_type == "chrome":
+                script = (
+                    'tell application "Google Chrome" '
+                    "to get URL of active tab of front window"
+                )
+            elif browser_type == "brave":
+                script = (
+                    'tell application "Brave Browser" '
+                    "to get URL of active tab of front window"
+                )
+            elif browser_type == "firefox":
+                logger.warning("Firefox URL detection not supported, skipping")
+                return None
+            else:
+                return None
+
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+            logger.warning("AppleScript failed: %s", result.stderr.strip())
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("AppleScript timed out")
+            return None
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Failed to get browser URL: %s", exc)
+            return None
 
     def capture_context(self) -> Dict[str, Any]:
         app = self.get_frontmost_app()
         return {
             "app": app,
             "window_title": self.get_window_title(),
-            "url": self.get_browser_url(app) if self.is_browser(app) else None,
+            "url": self.get_browser_url() if self.is_browser(app) else None,
             "timestamp": datetime.now().isoformat(),
         }
 

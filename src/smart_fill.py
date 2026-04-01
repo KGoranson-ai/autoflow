@@ -123,7 +123,7 @@ class SmartFillSession:
             self.csv_data = result["data"]
             self.column_headers = self.csv_data.columns.tolist()
             self.csv_filename = os.path.basename(filepath)
-            self.csv_filepath = filepath
+            self.csv_filepath = os.path.abspath(filepath)
         return result
 
     def get_demo_csv_path(self, demo_type: str) -> str:
@@ -354,9 +354,14 @@ class SmartFillSession:
 
     def save_state_to_disk(self) -> str:
         total_rows = len(self.csv_data) if self.csv_data is not None else 0
+        csv_path = None
+        if self.csv_filepath:
+            csv_path = os.path.abspath(self.csv_filepath)
+        elif self.csv_filename:
+            csv_path = os.path.abspath(self.csv_filename)
         state = {
             "batch_id": self.batch_id,
-            "csv_file": self.csv_filepath or self.csv_filename,
+            "csv_file": csv_path,
             "current_row": int(self.current_row),
             "total_rows": int(total_rows),
             "field_mappings": self.field_mappings,
