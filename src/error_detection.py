@@ -20,6 +20,11 @@ from browser_context import BrowserContext
 logger = logging.getLogger(__name__)
 
 
+def _ed_debug(message: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[TimeoutDetectorDebug {ts}] {message}", flush=True)
+
+
 class TimeoutDetector:
     """Detect likely form submission failures using OS-level signals."""
 
@@ -33,37 +38,62 @@ class TimeoutDetector:
         Returns: success, timeout_error, or unknown.
         URL-based detection is limited in Firefox.
         """
+        _ed_debug(f"detect_error start max_wait={max_wait}")
         if self.is_browser_active():
             browser_type = BrowserContext().get_browser_type()
+            _ed_debug(f"Frontmost browser detected browser_type={browser_type}")
             if browser_type in ["safari", "chrome", "brave"]:
                 try:
+                    _ed_debug("Using URL-change detection path")
                     return self.detect_via_url_change(max_wait)
                 except Exception as exc:
                     logger.warning("URL detection failed: %s", exc)
+                    _ed_debug(f"URL detection exception: {type(exc).__name__}: {exc}")
             else:
                 logger.info(
                     "Skipping URL detection for %s, using keystroke fallback",
                     browser_type,
                 )
+                _ed_debug(f"Unsupported browser_type={browser_type}, falling back to keystroke test")
+        else:
+            _ed_debug("Frontmost app is not recognized as browser, using keystroke fallback")
         return self.detect_via_keystroke_test(max_wait)
 
     def detect_via_url_change(self, max_wait: int) -> str:
+        _ed_debug(f"detect_via_url_change start max_wait={max_wait}")
         initial_url = self.get_browser_url()
+        _ed_debug(f"Initial URL: {initial_url!r}")
+        start = time.time()
         time.sleep(max_wait)
+        elapsed = time.time() - start
+        _ed_debug(f"Waited for URL change: elapsed={elapsed:.2f}s")
         current_url = self.get_browser_url()
+        _ed_debug(f"Current URL: {current_url!r}")
         if not initial_url or not current_url:
+            _ed_debug("URL detection returned unknown (missing initial or current URL)")
             return "unknown"
-        return "success" if current_url != initial_url else "timeout_error"
+        result = "success" if current_url != initial_url else "timeout_error"
+        _ed_debug(f"URL detection result={result}")
+        return result
 
     def detect_via_keystroke_test(self, max_wait: int) -> str:
+        _ed_debug(f"detect_via_keystroke_test start max_wait={max_wait}")
+        start = time.time()
         time.sleep(max_wait)
+        elapsed = time.time() - start
+        _ed_debug(f"Keystroke fallback waited elapsed={elapsed:.2f}s")
         if not self.typing_engine:
+            _ed_debug("No typing_engine available -> unknown")
             return "unknown"
         result = self.typing_engine.send_key("backspace", test_mode=True)
+        _ed_debug(f"typing_engine.send_key backspace returned {result!r}")
         if result == "accepted":
+            _ed_debug("Fallback result=timeout_error (key accepted)")
             return "timeout_error"
         if result in ("blocked", "beep"):
+            _ed_debug("Fallback result=success (key blocked/beep)")
             return "success"
+        _ed_debug("Fallback result=unknown")
         return "unknown"
 
     def is_browser_active(self) -> bool:
@@ -76,8 +106,14 @@ class TimeoutDetector:
             'tell application "System Events" '
             'to get name of first application process whose frontmost is true'
         )
+        _ed_debug("Running AppleScript for frontmost app name")
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, text=True, check=False
+        )
+        _ed_debug(
+            "Frontmost app AppleScript result: "
+            f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
+            f"stderr={result.stderr.strip()!r}"
         )
         return result.stdout.strip()
 
@@ -94,6 +130,11 @@ class TimeoutDetector:
 
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, text=True, check=False
+        )
+        _ed_debug(
+            f"URL AppleScript result for app={app!r}: "
+            f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
+            f"stderr={result.stderr.strip()!r}"
         )
         return result.stdout.strip()
 

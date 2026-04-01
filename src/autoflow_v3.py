@@ -35,7 +35,7 @@ from resume_prompt import ResumePrompt
 # Try to import pynput for global hotkeys
 try:
     from pynput import keyboard
-    PYNPUT_AVAILABLE = True
+    PYNPUT_AVAILABLE = sys.version_info < (3, 13)
 except ImportError:
     PYNPUT_AVAILABLE = False
 
@@ -233,6 +233,11 @@ class SmartFillTypingAdapter:
     def __init__(self, autoflow_app: "AutoFlow"):
         self.app = autoflow_app
 
+    def _debug(self, message: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        thread_name = threading.current_thread().name
+        print(f"[SmartFillTypingAdapter {ts} {thread_name}] {message}", flush=True)
+
     def _build_engine(self) -> TypingEngine:
         config = TypingConfig(
             wpm=self.app.demo_mode.get_demo_speed() if self.app.demo_mode.enabled else self.app.wpm_var.get(),
@@ -244,6 +249,13 @@ class SmartFillTypingAdapter:
             mode="text",
             countdown_seconds=0,
         )
+        self._debug(
+            "Building TypingEngine with config: "
+            f"wpm={config.wpm}, humanization={config.humanization_level}, "
+            f"variation={config.speed_variation}, thinking={config.thinking_pauses}, "
+            f"punctuation={config.punctuation_pauses}, typos={config.typos_enabled}, "
+            f"countdown={config.countdown_seconds}"
+        )
         return TypingEngine(
             config,
             should_stop=lambda: self.app.should_stop or not self.app.smart_fill_session.is_running,
@@ -252,19 +264,29 @@ class SmartFillTypingAdapter:
         )
 
     def type_text(self, text: str) -> None:
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        self._debug(f"type_text called len={len(text)} preview={preview!r}")
         self._build_engine().type_text(text)
+        self._debug("type_text completed")
 
     def press_tab(self) -> None:
+        self._debug("press_tab called")
         pyautogui.press("tab")
+        self._debug("press_tab completed")
 
     def press_enter(self) -> None:
+        self._debug("press_enter called")
         pyautogui.press("enter")
+        self._debug("press_enter completed")
 
     def send_key(self, key: str, test_mode: bool = False) -> str:
         try:
+            self._debug(f"send_key called key={key!r} test_mode={test_mode}")
             pyautogui.press(key)
+            self._debug("send_key accepted")
             return "accepted"
-        except Exception:
+        except Exception as exc:
+            self._debug(f"send_key exception: {type(exc).__name__}: {exc}")
             return "unknown"
 
 
@@ -303,6 +325,11 @@ class AutoFlow:
         # Setup global hotkey listener if available
         if PYNPUT_AVAILABLE:
             self.setup_hotkey_listener()
+        else:
+            print(
+                "[AutoFlow] Global pynput listener disabled (using Tk key bindings only).",
+                flush=True,
+            )
         
         # Auto-pause when window gains focus (user clicked AutoFlow window)
         self.root.bind('<FocusIn>', self.on_window_focus)
@@ -1256,9 +1283,6 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         elif not bool(self.sf_demo_enabled_var.get()) and self.demo_mode.enabled:
             self.demo_mode.disable()
 
-        self.show_active_filling_screen()
-        self.register_smart_fill_hotkeys()
-
         checkpoint = CheckpointManager(
             every_n_rows=int(self.sf_checkpoint_every_var.get()),
             pause_duration=int(self.sf_checkpoint_pause_var.get()),
@@ -1266,8 +1290,6 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         )
         typing_adapter = SmartFillTypingAdapter(self)
         detector = TimeoutDetector(typing_engine=typing_adapter)
-
-        self.smart_fill_session.is_running = True
         self.smart_fill_thread = threading.Thread(
             target=self.smart_fill_session.execute_batch,
             kwargs={
@@ -1276,10 +1298,16 @@ EMERGENCY STOP: Move mouse to top-left corner"""
                 "checkpoint_manager": checkpoint,
                 "status_cb": lambda s: self.root.after(0, lambda: self.countdown_label.config(text=s)),
                 "row_cb": lambda _r: self.root.after(0, self.refresh_active_filling_screen),
+                "browser_cb": lambda b: self.root.after(0, lambda: self._on_batch_browser_detected(b)),
                 "completion_cb": lambda ok, err: self.root.after(0, lambda: self.on_smart_fill_complete(ok, err)),
             },
             daemon=True,
         )
+        self.show_active_filling_screen()
+        self.register_smart_fill_hotkeys()
+        # Must be set immediately before thread start to avoid focus/hotkey races.
+        self.smart_fill_session.is_paused = False
+        self.smart_fill_session.is_running = True
         self.smart_fill_thread.start()
 
     def show_active_filling_screen(self):
@@ -1307,25 +1335,29 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         is_supported = self.current_browser_type in {"safari", "chrome", "brave"}
         browser_label_text = f"Browser: {browser_name}"
         if is_supported:
-            ttk.Label(
+            self.browser_status_label = ttk.Label(
                 browser_frame,
                 text=f"{browser_label_text} ✓",
                 font=("Helvetica", 10),
                 foreground="green",
-            ).pack()
+            )
+            self.browser_status_label.pack()
+            self.browser_hint_label = None
         else:
-            ttk.Label(
+            self.browser_status_label = ttk.Label(
                 browser_frame,
                 text=f"{browser_label_text} ⚠️",
                 font=("Helvetica", 10),
                 foreground="orange",
-            ).pack()
-            ttk.Label(
+            )
+            self.browser_status_label.pack()
+            self.browser_hint_label = ttk.Label(
                 browser_frame,
                 text="(Error detection may be unreliable)",
                 font=("Helvetica", 8),
                 foreground="gray",
-            ).pack()
+            )
+            self.browser_hint_label.pack()
 
         data_frame = ttk.LabelFrame(self.smart_fill_content, text="Current Data", padding=10)
         data_frame.pack(pady=10, padx=20, fill="x")
@@ -1358,9 +1390,41 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         ttk.Button(controls, text="Stop", command=self.stop_batch).pack(side="left", padx=5)
         self.refresh_active_filling_screen()
 
+    def _render_browser_status(self):
+        if not hasattr(self, "browser_status_label"):
+            return
+        display_names = {
+            "safari": "Safari",
+            "chrome": "Chrome",
+            "brave": "Brave",
+            "firefox": "Firefox",
+            "other": "Unknown Browser",
+        }
+        browser_name = display_names.get(self.current_browser_type, "Unknown Browser")
+        is_supported = self.current_browser_type in {"safari", "chrome", "brave"}
+        if is_supported:
+            self.browser_status_label.config(
+                text=f"Browser: {browser_name} ✓",
+                foreground="green",
+            )
+            if hasattr(self, "browser_hint_label") and self.browser_hint_label is not None:
+                self.browser_hint_label.config(text="")
+        else:
+            self.browser_status_label.config(
+                text=f"Browser: {browser_name} ⚠️",
+                foreground="orange",
+            )
+            if hasattr(self, "browser_hint_label") and self.browser_hint_label is not None:
+                self.browser_hint_label.config(text="(Error detection may be unreliable)")
+
+    def _on_batch_browser_detected(self, browser_type: str):
+        self.current_browser_type = browser_type or "other"
+        self._render_browser_status()
+
     def refresh_active_filling_screen(self):
         if self.smart_fill_session.csv_data is None:
             return
+        self._render_browser_status()
         total = len(self.smart_fill_session.csv_data)
         cur = min(self.smart_fill_session.current_row + 1, total)
         self.row_counter_label.config(text=f"Current Row: {cur} / {total}")
@@ -1371,8 +1435,9 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             if len(value) > 30:
                 value = value[:30] + "..."
             lbl.config(text=value)
-        self.progress_bar["value"] = self.smart_fill_session.current_row
-        pct = (self.smart_fill_session.current_row / max(total, 1)) * 100
+        progress_value = min(max(self.smart_fill_session.current_row, 0), total)
+        self.progress_bar["value"] = progress_value
+        pct = (progress_value / max(total, 1)) * 100
         self.progress_pct_label.config(text=f"{pct:.0f}%")
 
     def on_smart_fill_complete(self, successful_count, error_count):
@@ -1511,6 +1576,16 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         else:
             self.notebook.select(self.smart_fill_frame)
             self.start_batch_execution()
+
+    def start_smart_fill_only(self):
+        """
+        Hotkey action for Cmd/Ctrl+Shift+F:
+        start Smart Fill if idle; never toggles pause/resume or stop.
+        """
+        if self.smart_fill_session.is_running:
+            self.status_label.config(text="Smart Fill already running.")
+            return
+        self.start_or_resume_smart_fill()
 
     def next_row_manual_smart_fill(self):
         if self.smart_fill_session.is_running:
@@ -1735,7 +1810,7 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.root.bind(seq_k, self._shortcut_clear)
         self.root.bind(seq_ret, self._shortcut_start)
         self.root.bind(seq_q, self._shortcut_quit)
-        self.root.bind(seq_sf_start, lambda e: (self.start_or_resume_smart_fill(), "break")[1])
+        self.root.bind(seq_sf_start, lambda e: (self.start_smart_fill_only(), "break")[1])
         self.root.bind(seq_sf_next, lambda e: (self.next_row_manual_smart_fill(), "break")[1])
         self.root.bind(seq_sf_pause, lambda e: (self.pause_batch(), "break")[1])
         self.root.bind(seq_sf_stop, lambda e: (self.stop_batch(), "break")[1])
@@ -2095,6 +2170,8 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             self.toggle_pause()
             # Show helpful message
             self.status_label.config(text="⏸ Auto-paused (you clicked AutoFlow). Click RESUME or press F8 to continue!")
+        if self.smart_fill_session.preflight_active:
+            return
         if self.smart_fill_session.is_running and not self.smart_fill_session.is_paused:
             self.smart_fill_session.pause()
             self.status_label.config(text="Typestra paused (you switched apps/window focus).")
@@ -2104,7 +2181,7 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self._pressed_keys = set()
 
         key_map = {
-            "f": self.start_or_resume_smart_fill,
+            "f": self.start_smart_fill_only,
             "n": self.next_row_manual_smart_fill,
             "p": self.pause_batch,
             "s": self.stop_batch,

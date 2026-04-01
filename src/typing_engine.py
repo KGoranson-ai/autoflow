@@ -46,6 +46,10 @@ class TypingEngine:
         self._is_paused = is_paused if is_paused is not None else (lambda: False)
         self._on_status = on_status if on_status is not None else (lambda s: None)
 
+    def _debug(self, message: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        print(f"[TypingEngineDebug {ts}] {message}", flush=True)
+
     @staticmethod
     def normalize_special_chars(text: str) -> str:
         """
@@ -153,20 +157,29 @@ class TypingEngine:
         use_punctuation = cfg.punctuation_pauses
         use_typos = cfg.typos_enabled
 
+        self._debug(
+            "type_text start: "
+            f"chars={len(text)}, countdown={countdown}, wpm={wpm}, "
+            f"human_level={human_level}, variation={use_variation}, "
+            f"thinking={use_thinking}, punctuation={use_punctuation}, typos={use_typos}"
+        )
         # Countdown
         for i in range(countdown, 0, -1):
             if self._should_stop():
+                self._debug("type_text aborted during countdown by should_stop()")
                 return
             self._on_status(f"⏱ Starting in {i}... Switch to target app NOW!")
             time.sleep(1)
 
         if self._should_stop():
+            self._debug("type_text aborted before typing by should_stop()")
             return
 
         self._on_status("⌨️ Typing... (Auto-handling list formatting)")
         text = self.normalize_special_chars(text)
         lines = text.split("\n")
         total_chars = len(text)
+        self._debug(f"type_text normalized chars={total_chars}, lines={len(lines)}")
         chars_since_pause = 0
         chars_typed = 0
 
@@ -181,6 +194,7 @@ class TypingEngine:
 
         for line_idx, line in enumerate(lines):
             if self._should_stop():
+                self._debug(f"type_text aborted at line_idx={line_idx} by should_stop()")
                 return
 
             is_list_item = self._is_list_marker(line)
@@ -204,6 +218,9 @@ class TypingEngine:
                     time.sleep(0.1)
 
                 if self._should_stop():
+                    self._debug(
+                        f"type_text aborted at line_idx={line_idx} char_idx={i} by should_stop()"
+                    )
                     return
 
                 char = line_to_type[i]
@@ -227,15 +244,25 @@ class TypingEngine:
                         wrong_char = random.choice("abcdefghijklmnopqrstuvwxyz")
 
                     pyautogui.PAUSE = 0
+                    self._debug(
+                        f"pyautogui.write typo wrong_char={wrong_char!r} line_idx={line_idx} char_idx={i}"
+                    )
                     pyautogui.write(wrong_char, interval=0)
                     time.sleep(random.uniform(0.05, 0.15))
                     time.sleep(random.uniform(0.3, 0.7))
+                    self._debug("pyautogui.press backspace for typo correction")
                     pyautogui.press("backspace")
                     time.sleep(random.uniform(0.1, 0.2))
                     pyautogui.PAUSE = 0
+                    self._debug(
+                        f"pyautogui.write corrected_char={correct_char!r} line_idx={line_idx} char_idx={i}"
+                    )
                     pyautogui.write(correct_char, interval=0)
                 else:
                     pyautogui.PAUSE = 0
+                    self._debug(
+                        f"pyautogui.write char={char!r} line_idx={line_idx} char_idx={i}"
+                    )
                     pyautogui.write(char, interval=0)
 
                 chars_typed += 1
@@ -273,13 +300,17 @@ class TypingEngine:
                 next_line = lines[line_idx + 1]
                 next_is_list = self._is_list_marker(next_line)
                 if is_list_item and not next_is_list:
+                    self._debug("pyautogui.press enter (list spacing 1)")
                     pyautogui.press("enter")
                     time.sleep(0.15)
+                    self._debug("pyautogui.press enter (list spacing 2)")
                     pyautogui.press("enter")
                     time.sleep(0.2)
                 else:
+                    self._debug("pyautogui.press enter (line break)")
                     pyautogui.press("enter")
                     time.sleep(random.uniform(0.2, 0.4))
+        self._debug("type_text completed")
 
     def type_spreadsheet(self, rows: List[List[str]]) -> None:
         """

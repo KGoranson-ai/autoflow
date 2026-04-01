@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 class BrowserContext:
     """Capture frontmost app context and browser URL when available."""
 
+    def _debug(self, message: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"[BrowserContextDebug {ts}] {message}", flush=True)
+
     def get_frontmost_app(self) -> str:
         if platform.system() != "Darwin":
             return ""
@@ -25,8 +29,14 @@ class BrowserContext:
             'tell application "System Events" '
             'to get name of first application process whose frontmost is true'
         )
+        self._debug("Running AppleScript for frontmost app")
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, text=True, check=False
+        )
+        self._debug(
+            "Frontmost app AppleScript result: "
+            f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
+            f"stderr={result.stderr.strip()!r}"
         )
         return result.stdout.strip()
 
@@ -44,7 +54,11 @@ class BrowserContext:
             "Brave Browser": "brave",
             "Firefox": "firefox",
         }
-        return browser_map.get(frontmost, "other")
+        browser_type = browser_map.get(frontmost, "other")
+        self._debug(
+            f"Mapped frontmost app to browser_type: app={frontmost!r} -> {browser_type!r}"
+        )
+        return browser_type
 
     def is_firefox(self) -> bool:
         return self.get_browser_type() == "firefox"
@@ -71,8 +85,14 @@ class BrowserContext:
             'to tell (first application process whose frontmost is true) '
             "to get name of front window"
         )
+        self._debug("Running AppleScript for front window title")
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, text=True, check=False
+        )
+        self._debug(
+            "Window title AppleScript result: "
+            f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
+            f"stderr={result.stderr.strip()!r}"
         )
         return result.stdout.strip()
 
@@ -83,6 +103,9 @@ class BrowserContext:
         Returns: URL string or None if failed.
         """
         browser_type = self.get_browser_type()
+        self._debug(
+            f"get_browser_url requested; app_name={app_name!r}, resolved_browser_type={browser_type!r}"
+        )
         try:
             if browser_type == "safari":
                 script = 'tell application "Safari" to get URL of front document'
@@ -109,25 +132,34 @@ class BrowserContext:
                 timeout=2,
                 check=False,
             )
+            self._debug(
+                "Browser URL AppleScript result: "
+                f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
+                f"stderr={result.stderr.strip()!r}"
+            )
             if result.returncode == 0:
                 return result.stdout.strip()
             logger.warning("AppleScript failed: %s", result.stderr.strip())
             return None
         except subprocess.TimeoutExpired:
             logger.warning("AppleScript timed out")
+            self._debug("Browser URL AppleScript timed out")
             return None
         except Exception as exc:  # pragma: no cover
             logger.warning("Failed to get browser URL: %s", exc)
+            self._debug(f"Browser URL AppleScript exception: {type(exc).__name__}: {exc}")
             return None
 
     def capture_context(self) -> Dict[str, Any]:
         app = self.get_frontmost_app()
-        return {
+        context = {
             "app": app,
             "window_title": self.get_window_title(),
             "url": self.get_browser_url() if self.is_browser(app) else None,
             "timestamp": datetime.now().isoformat(),
         }
+        self._debug(f"capture_context result: {context}")
+        return context
 
 
 class ContextVerifier:

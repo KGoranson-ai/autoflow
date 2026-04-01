@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import random
+import subprocess
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -20,6 +23,13 @@ from error_detection import ErrorLogger
 
 
 FieldConfig = Dict[str, Any]
+
+
+def _sf_debug(message: str) -> None:
+    """Print verbose Smart Fill debug logs to terminal."""
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    thread_name = threading.current_thread().name
+    print(f"[SmartFillDebug {ts} {thread_name}] {message}", flush=True)
 
 
 class CSVImporter:
@@ -93,6 +103,7 @@ class SmartFillSession:
         self.auto_advance = AutoAdvanceController()
         self.is_paused = False
         self.is_running = False
+        self.preflight_active = False
         self.batch_id: Optional[str] = None
         self.browser_context: Optional[Dict[str, Any]] = None
         self.error_count = 0
@@ -175,75 +186,183 @@ class SmartFillSession:
         *,
         status_cb: Optional[Callable[[str], None]] = None,
         row_cb: Optional[Callable[[int], None]] = None,
+        browser_cb: Optional[Callable[[str], None]] = None,
         completion_cb: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         if self.csv_data is None:
             raise ValueError("No CSV loaded.")
 
-        self.is_running = True
-        self.batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        self.error_count = 0
-        self.success_count = 0
-        self.browser_context = BrowserContext().capture_context()
-        self.save_state_to_disk()
-
-        while self.current_row < len(self.csv_data) and self.is_running:
-            while self.is_paused and self.is_running:
-                time.sleep(0.1)
-            if not self.is_running:
-                break
-
-            if row_cb:
-                row_cb(self.current_row)
-
-            self.fill_current_row(typing_engine)
-
-            error_result = error_detector.detect_error(
-                max_wait=self.auto_advance.timeout_seconds
+        # Force unpaused at thread entry to avoid races during pre-batch focus delay.
+        self.is_paused = False
+        try:
+            self.preflight_active = True
+            detected_browser_type = self._prepare_browser_focus_before_batch()
+            self.preflight_active = False
+            print(f"[SmartFillDebug] POST-FOCUS is_paused={self.is_paused}")
+            if browser_cb:
+                browser_cb(detected_browser_type)
+            _sf_debug(
+                "execute_batch start: "
+                f"row={self.current_row}, total_rows={len(self.csv_data)}, "
+                f"auto_advance_enabled={self.auto_advance.enabled}, "
+                f"timeout_seconds={self.auto_advance.timeout_seconds}, "
+                f"detected_browser_type={detected_browser_type!r}"
             )
-            if error_result != "success":
-                self.error_count += 1
-                self.log_error(self.current_row, error_result)
-                if self.auto_advance.stop_on_error:
-                    self.save_state_to_disk()
-                    self.stop()
+            self.is_running = True
+            self.batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            self.error_count = 0
+            self.success_count = 0
+            self.browser_context = BrowserContext().capture_context()
+            _sf_debug(f"Captured initial browser context: {self.browser_context}")
+            _sf_debug("About to save_state_to_disk")
+            self.save_state_to_disk()
+            _sf_debug("save_state_to_disk complete")
+            _sf_debug(
+                f"Entering main batch loop: current_row={self.current_row}, total_rows={len(self.csv_data)}"
+            )
+            print(f"[SmartFillDebug] PRE-LOOP STATE: is_paused={self.is_paused}, is_running={self.is_running}")
+
+            while self.current_row < len(self.csv_data) and self.is_running:
+                _sf_debug(
+                    f"Loop top: current_row={self.current_row}, is_running={self.is_running}, is_paused={self.is_paused}"
+                )
+                while self.is_paused and self.is_running:
+                    time.sleep(0.1)
+                if not self.is_running:
                     break
-            else:
-                self.success_count += 1
 
-            row_number = self.current_row + 1
-            self.auto_save_state_periodically()
-            if checkpoint_manager.should_pause_for_checkpoint(row_number):
-                self.pause_for_checkpoint(checkpoint_manager, status_cb=status_cb)
+                if row_cb:
+                    row_cb(self.current_row)
 
-            if self.auto_advance.enabled:
-                self.auto_advance_to_next_row(typing_engine, status_cb=status_cb)
-            else:
-                if status_cb:
-                    status_cb("Manual mode: waiting for Next Row command...")
-                self.wait_for_manual_advance()
+                _sf_debug(f"Starting fill_current_row for row_index={self.current_row}")
+                self.fill_current_row(typing_engine)
+                _sf_debug(f"Finished fill_current_row for row_index={self.current_row}")
 
-        self.on_batch_complete(completion_cb=completion_cb)
+                _sf_debug(
+                    "Running error detector: "
+                    f"max_wait={self.auto_advance.timeout_seconds}, row_index={self.current_row}"
+                )
+                error_result = error_detector.detect_error(
+                    max_wait=self.auto_advance.timeout_seconds
+                )
+                _sf_debug(
+                    f"Error detector result for row_index={self.current_row}: {error_result}"
+                )
+                if error_result != "success":
+                    self.error_count += 1
+                    self.log_error(self.current_row, error_result)
+                    if self.auto_advance.stop_on_error:
+                        self.save_state_to_disk()
+                        self.stop()
+                        break
+                else:
+                    self.success_count += 1
+
+                row_number = self.current_row + 1
+                self.auto_save_state_periodically()
+                if checkpoint_manager.should_pause_for_checkpoint(row_number):
+                    self.pause_for_checkpoint(checkpoint_manager, status_cb=status_cb)
+
+                if self.auto_advance.enabled:
+                    self.auto_advance_to_next_row(typing_engine, status_cb=status_cb)
+                else:
+                    if status_cb:
+                        status_cb("Manual mode: waiting for Next Row command...")
+                    self.wait_for_manual_advance()
+
+        except Exception as exc:
+            _sf_debug(f"FATAL execute_batch exception: {type(exc).__name__}: {exc}")
+            _sf_debug(traceback.format_exc())
+        finally:
+            self.preflight_active = False
+            self.on_batch_complete(completion_cb=completion_cb)
+
+    def _prepare_browser_focus_before_batch(self) -> str:
+        """
+        Give the user a moment to focus the browser, then optionally
+        activate Chrome if a browser is not frontmost, and re-detect.
+        """
+        if platform.system() != "Darwin":
+            _sf_debug("Skipping browser focus preparation (non-macOS)")
+            return "other"
+
+        _sf_debug("Pre-batch focus handoff: waiting 2.5s for user to click browser")
+        time.sleep(2.5)
+
+        context = BrowserContext()
+        frontmost_before = context.get_frontmost_app()
+        _sf_debug(f"Frontmost app after delay: {frontmost_before!r}")
+
+        browser_apps = {"Safari", "Google Chrome", "Brave Browser", "Firefox"}
+        if frontmost_before not in browser_apps:
+            _sf_debug(
+                "Frontmost app is not a supported browser. Attempting AppleScript activation for Google Chrome."
+            )
+            script = 'tell application "Google Chrome" to activate'
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            _sf_debug(
+                "Chrome activate AppleScript result: "
+                f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
+                f"stderr={result.stderr.strip()!r}"
+            )
+            time.sleep(1.0)
+
+        frontmost_after = context.get_frontmost_app()
+        browser_type_after = context.get_browser_type()
+        _sf_debug(
+            "Frontmost app re-detected before batch typing: "
+            f"app={frontmost_after!r}, browser_type={browser_type_after!r}"
+        )
+        return browser_type_after
 
     def fill_current_row(self, typing_engine: Any) -> None:
+        _sf_debug(f"ENTER fill_current_row row_index={self.current_row}")
+        _sf_debug(
+            f"fill_current_row enter: row_index={self.current_row}, "
+            f"mapped_fields={len(self.field_mappings)}"
+        )
         for position, field_config in enumerate(self.field_mappings, start=1):
+            _sf_debug(f"Field position={position} config={field_config}")
             if not field_config:
+                _sf_debug(f"Field position={position} skipped (no mapping)")
                 continue
             if field_config.get("type", "text") != "text":
+                _sf_debug(
+                    f"Field position={position} skipped (type={field_config.get('type')})"
+                )
                 continue
 
             value = self.get_value_for_field(position)
             if value is None:
+                _sf_debug(
+                    f"Field position={position} value=None -> press_tab()"
+                )
                 typing_engine.press_tab()
                 continue
 
+            preview = value if len(value) <= 80 else value[:77] + "..."
+            _sf_debug(
+                f"Field position={position} typing value len={len(value)} preview={preview!r}"
+            )
             typing_engine.type_text(value)
             time.sleep(random.uniform(0.1, 0.3))
 
             if self.auto_advance.navigation == "enter":
+                _sf_debug(
+                    f"Field position={position} navigation=enter -> press_enter()"
+                )
                 typing_engine.press_enter()
             else:
+                _sf_debug(
+                    f"Field position={position} navigation=tab -> press_tab()"
+                )
                 typing_engine.press_tab()
+        _sf_debug(f"fill_current_row exit: row_index={self.current_row}")
 
     def auto_advance_to_next_row(
         self, typing_engine: Any, *, status_cb: Optional[Callable[[str], None]] = None
@@ -292,7 +411,13 @@ class SmartFillSession:
         self._manual_advance_event.set()
 
     def next_row_manual(self) -> None:
-        self.current_row += 1
+        if self.csv_data is None:
+            self.current_row += 1
+            self._manual_advance_event.set()
+            return
+        total_rows = len(self.csv_data)
+        # Clamp to total_rows so progress cannot exceed 100%.
+        self.current_row = min(self.current_row + 1, total_rows)
         self._manual_advance_event.set()
 
     def reset(self) -> None:
