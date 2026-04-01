@@ -8,7 +8,7 @@ import argparse
 import platform
 import sys
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 import pyautogui
 import time
 import random
@@ -19,9 +19,18 @@ import json
 import os
 import re
 import unicodedata
+from datetime import datetime
 from typing import List, Tuple
 
 from typing_engine import TypingEngine, TypingConfig
+from smart_fill import SmartFillSession
+from error_detection import TimeoutDetector, CheckpointManager
+from retry_manager import RetryManager, BatchHistory
+from browser_context import BrowserContext, ContextVerifier
+from demo_mode import DemoMode
+from firefox_warning import FirefoxWarningDialog
+from sleep_wake_detector import SleepWakeDetector
+from resume_prompt import ResumePrompt
 
 # Try to import pynput for global hotkeys
 try:
@@ -45,6 +54,7 @@ OCR_MAX_FILE_BYTES = 10 * 1024 * 1024
 # Persistent user settings (~/.autoflow/settings.json)
 AUTOFLOW_DIR = os.path.join(os.path.expanduser("~"), ".autoflow")
 SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "settings.json")
+SMART_FILL_SETTINGS_PATH = os.path.expanduser("~/Documents/Typestra/Settings/smart_fill.json")
 
 
 class OCREngine:
@@ -217,6 +227,47 @@ def _attach_tooltip(widget, text: str):
     widget.bind("<Leave>", hide)
 
 
+class SmartFillTypingAdapter:
+    """Small adapter to reuse TypingEngine settings for Smart Fill field typing."""
+
+    def __init__(self, autoflow_app: "AutoFlow"):
+        self.app = autoflow_app
+
+    def _build_engine(self) -> TypingEngine:
+        config = TypingConfig(
+            wpm=self.app.demo_mode.get_demo_speed() if self.app.demo_mode.enabled else self.app.wpm_var.get(),
+            humanization_level=self.app.human_var.get(),
+            speed_variation=self.app.variation_var.get(),
+            thinking_pauses=self.app.thinking_var.get(),
+            punctuation_pauses=self.app.punctuation_var.get(),
+            typos_enabled=self.app.typos_var.get(),
+            mode="text",
+            countdown_seconds=0,
+        )
+        return TypingEngine(
+            config,
+            should_stop=lambda: self.app.should_stop or not self.app.smart_fill_session.is_running,
+            is_paused=lambda: self.app.is_paused or self.app.smart_fill_session.is_paused,
+            on_status=lambda s: self.app.root.after(0, lambda: self.app.status_label.config(text=s)),
+        )
+
+    def type_text(self, text: str) -> None:
+        self._build_engine().type_text(text)
+
+    def press_tab(self) -> None:
+        pyautogui.press("tab")
+
+    def press_enter(self) -> None:
+        pyautogui.press("enter")
+
+    def send_key(self, key: str, test_mode: bool = False) -> str:
+        try:
+            pyautogui.press(key)
+            return "accepted"
+        except Exception:
+            return "unknown"
+
+
 class AutoFlow:
     def __init__(self, root):
         self.root = root
@@ -239,6 +290,15 @@ class AutoFlow:
         self.should_stop = False
         self.is_paused = False  # NEW: Track pause state
         self.mode = "text"  # "text" or "spreadsheet"
+        self.smart_fill_session = SmartFillSession()
+        self.retry_manager = RetryManager()
+        self.batch_history = BatchHistory()
+        self.context_verifier = ContextVerifier()
+        self.demo_mode = DemoMode()
+        self.smart_fill_thread = None
+        self.smart_fill_settings = {}
+        self.sleep_wake_detector = None
+        self.current_browser_type = "other"
         
         # Setup global hotkey listener if available
         if PYNPUT_AVAILABLE:
@@ -253,12 +313,26 @@ class AutoFlow:
         self.create_ui()
         self.load_settings()
         self._setup_keyboard_shortcuts()
+        self.sleep_wake_detector = SleepWakeDetector()
+        self.sleep_wake_detector.register_wake_handler(
+            lambda: self.root.after(0, self.on_wake_from_sleep)
+        )
+        self.root.after(200, self.check_for_interrupted_session)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def create_ui(self):
-        # Create a canvas with scrollbar for the entire interface
-        canvas = tk.Canvas(self.root)
-        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True)
+
+        autoflow_tab = ttk.Frame(self.notebook)
+        self.notebook.add(autoflow_tab, text="AutoFlow")
+
+        smart_fill_tab = ttk.Frame(self.notebook)
+        self.notebook.add(smart_fill_tab, text="Smart Fill")
+
+        # Create a canvas with scrollbar for the AutoFlow tab
+        canvas = tk.Canvas(autoflow_tab)
+        scrollbar = ttk.Scrollbar(autoflow_tab, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         
         scrollable_frame.bind(
@@ -283,8 +357,8 @@ class AutoFlow:
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Configure grid weights
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        autoflow_tab.columnconfigure(0, weight=1)
+        autoflow_tab.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(2, weight=1)
         
@@ -517,6 +591,43 @@ class AutoFlow:
             command=self._on_settings_changed,
         )
         self.typos_check.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        # Smart Fill settings quick panel
+        self.sf_settings_frame = ttk.LabelFrame(settings_frame, text="Smart Fill Settings", padding="5")
+        self.sf_settings_frame.grid(row=8, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 2))
+        self.sf_global_auto_var = tk.BooleanVar(value=True)
+        self.sf_global_delay_var = tk.IntVar(value=3)
+        self.sf_global_checkpoint_var = tk.IntVar(value=5)
+        self.sf_global_timeout_var = tk.IntVar(value=10)
+        self.sf_global_demo_var = tk.BooleanVar(value=False)
+
+        ttk.Checkbutton(
+            self.sf_settings_frame,
+            text="Enable auto-advance to next row",
+            variable=self.sf_global_auto_var,
+            command=self._on_settings_changed,
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(self.sf_settings_frame, text="Delay").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(
+            self.sf_settings_frame, from_=1, to=30, width=5, textvariable=self.sf_global_delay_var,
+            command=self._on_settings_changed
+        ).grid(row=1, column=1, sticky="w", padx=5)
+        ttk.Label(self.sf_settings_frame, text="Checkpoint every N rows").grid(row=2, column=0, sticky="w")
+        ttk.Spinbox(
+            self.sf_settings_frame, from_=1, to=50, width=5, textvariable=self.sf_global_checkpoint_var,
+            command=self._on_settings_changed
+        ).grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Label(self.sf_settings_frame, text="Timeout seconds").grid(row=3, column=0, sticky="w")
+        ttk.Spinbox(
+            self.sf_settings_frame, from_=3, to=60, width=5, textvariable=self.sf_global_timeout_var,
+            command=self._on_settings_changed
+        ).grid(row=3, column=1, sticky="w", padx=5)
+        ttk.Checkbutton(
+            self.sf_settings_frame,
+            text="Enable Demo Mode",
+            variable=self.sf_global_demo_var,
+            command=self._on_settings_changed,
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
         
         # Button frame
         button_frame = ttk.Frame(main_frame)
@@ -604,9 +715,704 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         )
         instructions_label.grid(row=0, column=0, sticky=tk.W)
 
+        self.create_smart_fill_tab(smart_fill_tab)
+
+    def create_smart_fill_tab(self, parent):
+        self.smart_fill_frame = parent
+        self.smart_fill_content = ttk.Frame(parent, padding=12)
+        self.smart_fill_content.pack(fill="both", expand=True)
+        self.load_smart_fill_settings()
+        self.show_import_screen()
+
+    def _clear_smart_fill_content(self):
+        for widget in self.smart_fill_content.winfo_children():
+            widget.destroy()
+
+    def show_import_screen(self):
+        self._clear_smart_fill_content()
+        ttk.Label(
+            self.smart_fill_content,
+            text="No Data Loaded",
+            font=("Helvetica", 18),
+        ).pack(pady=20)
+        ttk.Label(
+            self.smart_fill_content,
+            text="Load data to start Smart Fill automation",
+        ).pack(pady=10)
+
+        btn_frame = ttk.Frame(self.smart_fill_content)
+        btn_frame.pack(pady=20)
+        ttk.Button(btn_frame, text="Import CSV File", width=28, command=self.import_csv_file).pack(pady=5)
+        ttk.Button(btn_frame, text="Paste from Clipboard", width=28, command=self.paste_from_clipboard).pack(pady=5)
+        ttk.Button(btn_frame, text="Toggle Demo Mode", width=28, command=self.toggle_demo_mode).pack(pady=5)
+
+        ttk.Label(
+            self.smart_fill_content,
+            text="Recent Mappings",
+            font=("Helvetica", 12, "bold"),
+        ).pack(pady=(30, 10))
+        self.display_recent_mappings()
+
+    def display_recent_mappings(self):
+        container = ttk.Frame(self.smart_fill_content)
+        container.pack(fill="x", padx=20)
+        mappings_dir = os.path.expanduser("~/Documents/Typestra/Mappings")
+        if not os.path.isdir(mappings_dir):
+            ttk.Label(container, text="No saved mappings yet.", foreground="gray").pack(anchor="w")
+            return
+        mapping_files = sorted(
+            [f for f in os.listdir(mappings_dir) if f.endswith(".json")],
+            reverse=True,
+        )[:5]
+        if not mapping_files:
+            ttk.Label(container, text="No saved mappings yet.", foreground="gray").pack(anchor="w")
+            return
+        for filename in mapping_files:
+            name = filename[:-5]
+            row = ttk.Frame(container)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=f"- {name}").pack(side="left")
+            ttk.Button(row, text="Load", command=lambda n=name: self.load_mapping_template(n)).pack(side="right")
+
+    def import_csv_file(self):
+        filename = filedialog.askopenfilename(
+            title="Select CSV File",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not filename:
+            return
+        result = self.smart_fill_session.load_csv(filename)
+        if not result.get("success"):
+            messagebox.showerror("CSV Error", result.get("error", "Unknown CSV error"))
+            return
+        self.show_field_mapping_screen()
+
+    def paste_from_clipboard(self):
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            messagebox.showwarning("Clipboard Empty", "Clipboard does not contain text.")
+            return
+        temp_dir = os.path.expanduser("~/Documents/Typestra/Demo")
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file = os.path.join(temp_dir, "clipboard_import.csv")
+        with open(temp_file, "w", encoding="utf-8") as f:
+            f.write(text)
+        result = self.smart_fill_session.load_csv(temp_file)
+        if not result.get("success"):
+            messagebox.showerror("CSV Error", result.get("error", "Invalid clipboard CSV"))
+            return
+        self.show_field_mapping_screen()
+
+    def load_mapping_template(self, template_name):
+        try:
+            self.smart_fill_session.load_mapping(template_name)
+        except Exception as exc:
+            messagebox.showerror("Load Mapping Failed", str(exc))
+            return
+        if self.smart_fill_session.csv_data is None:
+            messagebox.showinfo("Mapping Loaded", "Mapping loaded. Import CSV data to apply it.")
+            return
+        self.show_field_mapping_screen()
+
+    def show_field_mapping_screen(self):
+        self._clear_smart_fill_content()
+        rows = len(self.smart_fill_session.csv_data) if self.smart_fill_session.csv_data is not None else 0
+        ttk.Label(
+            self.smart_fill_content,
+            text=f"Data: {self.smart_fill_session.csv_filename or 'Imported CSV'} ({rows} rows)",
+            font=("Helvetica", 12),
+        ).pack(pady=10)
+
+        canvas = tk.Canvas(self.smart_fill_content)
+        scrollbar = ttk.Scrollbar(self.smart_fill_content, orient="vertical", command=canvas.yview)
+        scrollable = ttk.Frame(canvas)
+        scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        ttk.Label(scrollable, text="FIELD MAPPING", font=("Helvetica", 12, "bold")).pack(pady=10)
+        self.field_mapping_widgets = []
+        existing_count = len([m for m in self.smart_fill_session.field_mappings if m]) or 5
+        for i in range(existing_count):
+            self.add_field_mapping_row(scrollable, i + 1)
+
+        ttk.Button(scrollable, text="+ Add Field", command=lambda: self.add_more_field(scrollable)).pack(pady=10)
+        ttk.Separator(scrollable, orient="horizontal").pack(fill="x", pady=15)
+        ttk.Label(scrollable, text="AUTOMATION SETTINGS", font=("Helvetica", 12, "bold")).pack(pady=8)
+
+        self.sf_auto_advance_var = tk.BooleanVar(value=self.smart_fill_settings.get("enabled", True))
+        self.sf_delay_var = tk.IntVar(value=int(self.smart_fill_settings.get("delay_seconds", 3)))
+        self.sf_checkpoint_var = tk.BooleanVar(value=self.smart_fill_settings.get("checkpoint_enabled", True))
+        self.sf_checkpoint_every_var = tk.IntVar(value=int(self.smart_fill_settings.get("checkpoint_every", 5)))
+        self.sf_checkpoint_pause_var = tk.IntVar(value=int(self.smart_fill_settings.get("checkpoint_pause", 5)))
+        self.sf_timeout_var = tk.IntVar(value=int(self.smart_fill_settings.get("timeout_seconds", 10)))
+        self.sf_stop_on_error_var = tk.BooleanVar(value=bool(self.smart_fill_settings.get("stop_on_error", False)))
+        self.sf_action_var = tk.StringVar(value=self.smart_fill_settings.get("action", "next_row"))
+        self.sf_demo_enabled_var = tk.BooleanVar(value=bool(self.smart_fill_settings.get("demo_enabled", False)))
+
+        ttk.Checkbutton(scrollable, text="Enable auto-advance to next row", variable=self.sf_auto_advance_var).pack(anchor="w", padx=20)
+        row1 = ttk.Frame(scrollable)
+        row1.pack(anchor="w", padx=40, pady=3)
+        ttk.Label(row1, text="Delay (seconds):").pack(side="left")
+        ttk.Spinbox(row1, from_=1, to=30, width=5, textvariable=self.sf_delay_var).pack(side="left", padx=6)
+
+        row2 = ttk.Frame(scrollable)
+        row2.pack(anchor="w", padx=40, pady=3)
+        ttk.Label(row2, text="Action:").pack(side="left")
+        ttk.Radiobutton(row2, text="Next row", value="next_row", variable=self.sf_action_var).pack(side="left", padx=6)
+        ttk.Radiobutton(row2, text="Press Enter + next", value="submit_form", variable=self.sf_action_var).pack(side="left", padx=6)
+
+        ttk.Checkbutton(
+            scrollable,
+            text="Manual checkpoints",
+            variable=self.sf_checkpoint_var,
+        ).pack(anchor="w", padx=20, pady=2)
+        row3 = ttk.Frame(scrollable)
+        row3.pack(anchor="w", padx=40, pady=3)
+        ttk.Label(row3, text="Every N rows:").pack(side="left")
+        ttk.Spinbox(row3, from_=1, to=50, width=5, textvariable=self.sf_checkpoint_every_var).pack(side="left", padx=6)
+        ttk.Label(row3, text="Pause seconds:").pack(side="left")
+        ttk.Spinbox(row3, from_=1, to=30, width=5, textvariable=self.sf_checkpoint_pause_var).pack(side="left", padx=6)
+
+        row4 = ttk.Frame(scrollable)
+        row4.pack(anchor="w", padx=20, pady=3)
+        ttk.Label(row4, text="Timeout seconds:").pack(side="left")
+        ttk.Spinbox(row4, from_=3, to=60, width=5, textvariable=self.sf_timeout_var).pack(side="left", padx=6)
+        ttk.Checkbutton(row4, text="Stop batch on error", variable=self.sf_stop_on_error_var).pack(side="left", padx=10)
+        ttk.Checkbutton(row4, text="Enable Demo Mode", variable=self.sf_demo_enabled_var).pack(side="left", padx=10)
+
+        footer = ttk.Frame(self.smart_fill_content)
+        footer.pack(side="bottom", pady=12)
+        ttk.Button(footer, text="Save Mapping", command=self.save_mapping_dialog).pack(side="left", padx=5)
+        ttk.Button(footer, text="Start Filling", command=self.start_batch_execution).pack(side="left", padx=5)
+
+    def add_field_mapping_row(self, parent, field_num):
+        row = ttk.Frame(parent, relief="groove", borderwidth=1, padding=6)
+        row.pack(fill="x", padx=10, pady=4)
+        ttk.Label(row, text=f"Field {field_num}:", width=10).grid(row=0, column=0, padx=5, pady=4, sticky="w")
+
+        type_var = tk.StringVar(value="Text")
+        type_dropdown = ttk.Combobox(
+            row,
+            textvariable=type_var,
+            values=["Text", "Click (Coming in Phase 2)", "Dropdown (Coming in Phase 2)", "Checkbox (Coming in Phase 2)"],
+            state="readonly",
+            width=28,
+        )
+        type_dropdown.current(0)
+        type_dropdown.grid(row=0, column=1, padx=5, pady=4)
+        type_dropdown.bind("<<ComboboxSelected>>", lambda _e: type_dropdown.current(0))
+
+        col_var = tk.StringVar(value="-- None --")
+        columns = ["-- None --"] + self.smart_fill_session.column_headers
+        col_dd = ttk.Combobox(row, textvariable=col_var, values=columns, state="readonly", width=24)
+        col_dd.grid(row=0, column=2, padx=5, pady=4)
+
+        preview = ttk.Label(row, text="Preview: ", foreground="gray")
+        preview.grid(row=1, column=1, columnspan=2, sticky="w", padx=5, pady=2)
+        col_dd.bind("<<ComboboxSelected>>", lambda _e, n=field_num, v=col_var: self.update_preview(n, v.get()))
+
+        skip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="Skip if empty", variable=skip_var).grid(row=0, column=3, padx=5, pady=4)
+
+        existing = None
+        if field_num <= len(self.smart_fill_session.field_mappings):
+            existing = self.smart_fill_session.field_mappings[field_num - 1]
+        if existing:
+            selected_column = existing.get("column", "-- None --")
+            if selected_column in columns:
+                col_var.set(selected_column)
+            skip_var.set(bool(existing.get("skip_empty", False)))
+            self.update_preview(field_num, col_var.get(), preview_widget=preview)
+
+        self.field_mapping_widgets.append(
+            {
+                "field_num": field_num,
+                "type_var": type_var,
+                "column_var": col_var,
+                "skip_var": skip_var,
+                "preview_label": preview,
+            }
+        )
+
+    def add_more_field(self, parent):
+        self.add_field_mapping_row(parent, len(self.field_mapping_widgets) + 1)
+
+    def update_preview(self, field_num, column_name, preview_widget=None):
+        widget = preview_widget
+        if widget is None:
+            for entry in self.field_mapping_widgets:
+                if entry["field_num"] == field_num:
+                    widget = entry["preview_label"]
+                    break
+        if widget is None:
+            return
+        if column_name in ("", "-- None --") or self.smart_fill_session.csv_data is None:
+            widget.config(text="Preview: ")
+            return
+        try:
+            value = str(self.smart_fill_session.csv_data.loc[0, column_name])
+        except Exception:
+            value = ""
+        value = value.replace("\n", " ").replace("\r", " ")
+        if len(value) > 30:
+            value = value[:30] + "..."
+        widget.config(text=f'Preview: "{value}"')
+
+    def collect_field_mappings(self):
+        mappings = []
+        for entry in self.field_mapping_widgets:
+            col = entry["column_var"].get()
+            if col == "-- None --":
+                mappings.append(None)
+                continue
+            mappings.append(
+                {
+                    "type": "text",
+                    "column": col,
+                    "skip_empty": bool(entry["skip_var"].get()),
+                }
+            )
+        self.smart_fill_session.field_mappings = mappings
+
+    def save_mapping_dialog(self):
+        self.collect_field_mappings()
+        name = simpledialog.askstring("Save Mapping", "Template name:")
+        if not name:
+            return
+        path = self.smart_fill_session.save_mapping(name.strip())
+        messagebox.showinfo("Mapping Saved", f"Saved to:\n{path}")
+
+    def save_smart_fill_settings(self):
+        os.makedirs(os.path.dirname(SMART_FILL_SETTINGS_PATH), exist_ok=True)
+        payload = {
+            "enabled": bool(self.sf_auto_advance_var.get()) if hasattr(self, "sf_auto_advance_var") else True,
+            "delay_seconds": int(self.sf_delay_var.get()) if hasattr(self, "sf_delay_var") else 3,
+            "action": self.sf_action_var.get() if hasattr(self, "sf_action_var") else "next_row",
+            "checkpoint_enabled": bool(self.sf_checkpoint_var.get()) if hasattr(self, "sf_checkpoint_var") else True,
+            "checkpoint_every": int(self.sf_checkpoint_every_var.get()) if hasattr(self, "sf_checkpoint_every_var") else 5,
+            "checkpoint_pause": int(self.sf_checkpoint_pause_var.get()) if hasattr(self, "sf_checkpoint_pause_var") else 5,
+            "timeout_seconds": int(self.sf_timeout_var.get()) if hasattr(self, "sf_timeout_var") else 10,
+            "stop_on_error": bool(self.sf_stop_on_error_var.get()) if hasattr(self, "sf_stop_on_error_var") else False,
+            "demo_enabled": bool(self.sf_demo_enabled_var.get()) if hasattr(self, "sf_demo_enabled_var") else False,
+        }
+        with open(SMART_FILL_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        self.smart_fill_settings = payload
+
+    def load_smart_fill_settings(self):
+        if os.path.isfile(SMART_FILL_SETTINGS_PATH):
+            try:
+                with open(SMART_FILL_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                    self.smart_fill_settings = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                self.smart_fill_settings = {}
+        else:
+            self.smart_fill_settings = {}
+
+    def start_batch_execution(self):
+        if self.smart_fill_session.csv_data is None:
+            messagebox.showwarning("No Data", "Import CSV data first.")
+            return
+
+        context = BrowserContext()
+        browser_type = context.get_browser_type()
+        if browser_type == "firefox":
+            firefox_warning = FirefoxWarningDialog()
+            if firefox_warning.should_show_warning():
+                continue_anyway = firefox_warning.show_warning(parent=self.root)
+                if not continue_anyway:
+                    return
+        self.current_browser_type = browser_type
+
+        self.collect_field_mappings()
+        self.save_smart_fill_settings()
+
+        self.smart_fill_session.auto_advance.enabled = bool(self.sf_auto_advance_var.get())
+        self.smart_fill_session.auto_advance.delay_seconds = int(self.sf_delay_var.get())
+        self.smart_fill_session.auto_advance.action = self.sf_action_var.get()
+        self.smart_fill_session.auto_advance.timeout_seconds = int(self.sf_timeout_var.get())
+        self.smart_fill_session.auto_advance.stop_on_error = bool(self.sf_stop_on_error_var.get())
+
+        if bool(self.sf_demo_enabled_var.get()) and not self.demo_mode.enabled:
+            self.demo_mode.enable(self.root, "candidates")
+        elif not bool(self.sf_demo_enabled_var.get()) and self.demo_mode.enabled:
+            self.demo_mode.disable()
+
+        self.show_active_filling_screen()
+        self.register_smart_fill_hotkeys()
+
+        checkpoint = CheckpointManager(
+            every_n_rows=int(self.sf_checkpoint_every_var.get()),
+            pause_duration=int(self.sf_checkpoint_pause_var.get()),
+            enabled=bool(self.sf_checkpoint_var.get()),
+        )
+        typing_adapter = SmartFillTypingAdapter(self)
+        detector = TimeoutDetector(typing_engine=typing_adapter)
+
+        self.smart_fill_session.is_running = True
+        self.smart_fill_thread = threading.Thread(
+            target=self.smart_fill_session.execute_batch,
+            kwargs={
+                "typing_engine": typing_adapter,
+                "error_detector": detector,
+                "checkpoint_manager": checkpoint,
+                "status_cb": lambda s: self.root.after(0, lambda: self.countdown_label.config(text=s)),
+                "row_cb": lambda _r: self.root.after(0, self.refresh_active_filling_screen),
+                "completion_cb": lambda ok, err: self.root.after(0, lambda: self.on_smart_fill_complete(ok, err)),
+            },
+            daemon=True,
+        )
+        self.smart_fill_thread.start()
+
+    def show_active_filling_screen(self):
+        self._clear_smart_fill_content()
+        ttk.Label(
+            self.smart_fill_content,
+            text="FILLING IN PROGRESS...",
+            font=("Helvetica", 16, "bold"),
+            foreground="green",
+        ).pack(pady=20)
+
+        self.row_counter_label = ttk.Label(self.smart_fill_content, text="", font=("Helvetica", 14))
+        self.row_counter_label.pack(pady=6)
+
+        browser_frame = ttk.Frame(self.smart_fill_content)
+        browser_frame.pack(pady=5)
+        display_names = {
+            "safari": "Safari",
+            "chrome": "Chrome",
+            "brave": "Brave",
+            "firefox": "Firefox",
+            "other": "Unknown Browser",
+        }
+        browser_name = display_names.get(self.current_browser_type, "Unknown Browser")
+        is_supported = self.current_browser_type in {"safari", "chrome", "brave"}
+        browser_label_text = f"Browser: {browser_name}"
+        if is_supported:
+            ttk.Label(
+                browser_frame,
+                text=f"{browser_label_text} ✓",
+                font=("Helvetica", 10),
+                foreground="green",
+            ).pack()
+        else:
+            ttk.Label(
+                browser_frame,
+                text=f"{browser_label_text} ⚠️",
+                font=("Helvetica", 10),
+                foreground="orange",
+            ).pack()
+            ttk.Label(
+                browser_frame,
+                text="(Error detection may be unreliable)",
+                font=("Helvetica", 8),
+                foreground="gray",
+            ).pack()
+
+        data_frame = ttk.LabelFrame(self.smart_fill_content, text="Current Data", padding=10)
+        data_frame.pack(pady=10, padx=20, fill="x")
+        self.current_data_labels = {}
+        for col in self.smart_fill_session.column_headers[:4]:
+            row = ttk.Frame(data_frame)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=f"{col}:", width=15).pack(side="left")
+            lbl = ttk.Label(row, text="", foreground="blue")
+            lbl.pack(side="left")
+            self.current_data_labels[col] = lbl
+
+        self.progress_bar = ttk.Progressbar(
+            self.smart_fill_content,
+            length=420,
+            mode="determinate",
+            maximum=max(1, len(self.smart_fill_session.csv_data)),
+        )
+        self.progress_bar.pack(pady=10)
+        self.progress_pct_label = ttk.Label(self.smart_fill_content, text="0%")
+        self.progress_pct_label.pack(pady=4)
+        self.countdown_label = ttk.Label(self.smart_fill_content, text="")
+        self.countdown_label.pack(pady=8)
+
+        controls = ttk.Frame(self.smart_fill_content)
+        controls.pack(pady=14)
+        self.pause_btn = ttk.Button(controls, text="Pause", command=self.pause_batch)
+        self.pause_btn.pack(side="left", padx=5)
+        ttk.Button(controls, text="Skip Row", command=self.skip_current_row).pack(side="left", padx=5)
+        ttk.Button(controls, text="Stop", command=self.stop_batch).pack(side="left", padx=5)
+        self.refresh_active_filling_screen()
+
+    def refresh_active_filling_screen(self):
+        if self.smart_fill_session.csv_data is None:
+            return
+        total = len(self.smart_fill_session.csv_data)
+        cur = min(self.smart_fill_session.current_row + 1, total)
+        self.row_counter_label.config(text=f"Current Row: {cur} / {total}")
+        idx = min(max(self.smart_fill_session.current_row, 0), max(total - 1, 0))
+        row_data = self.smart_fill_session.csv_data.loc[idx]
+        for col, lbl in self.current_data_labels.items():
+            value = str(row_data.get(col, "")).replace("\n", " ").replace("\r", " ")
+            if len(value) > 30:
+                value = value[:30] + "..."
+            lbl.config(text=value)
+        self.progress_bar["value"] = self.smart_fill_session.current_row
+        pct = (self.smart_fill_session.current_row / max(total, 1)) * 100
+        self.progress_pct_label.config(text=f"{pct:.0f}%")
+
+    def on_smart_fill_complete(self, successful_count, error_count):
+        if self.demo_mode.enabled:
+            self.demo_mode.disable()
+        total_rows = len(self.smart_fill_session.csv_data) if self.smart_fill_session.csv_data is not None else 0
+        if self.smart_fill_session.batch_id:
+            self.batch_history.save_batch_metadata(
+                batch_id=self.smart_fill_session.batch_id,
+                csv_file=self.smart_fill_session.csv_filename or "clipboard_import.csv",
+                total_rows=total_rows,
+                successful=successful_count,
+                errors=error_count,
+                mapping_used="active_mapping",
+            )
+        self.smart_fill_session.clear_recovery_state()
+        self.show_completion_screen(successful_count, error_count)
+
+    def show_completion_screen(self, successful_count, error_count):
+        self._clear_smart_fill_content()
+        ttk.Label(
+            self.smart_fill_content,
+            text="Batch Complete!",
+            font=("Helvetica", 18, "bold"),
+            foreground="green",
+        ).pack(pady=20)
+        ttk.Label(self.smart_fill_content, text=f"Successful: {successful_count}", foreground="green").pack()
+        ttk.Label(self.smart_fill_content, text=f"Errors: {error_count}", foreground="orange").pack()
+
+        details_frame = ttk.LabelFrame(
+            self.smart_fill_content,
+            text="Batch Details",
+            padding=10,
+        )
+        details_frame.pack(pady=10, padx=20, fill="x")
+        display_names = {
+            "safari": "Safari",
+            "chrome": "Chrome",
+            "brave": "Brave",
+            "firefox": "Firefox",
+            "other": "Unknown Browser",
+        }
+        browser_name = display_names.get(self.current_browser_type, "Unknown Browser")
+        ttk.Label(details_frame, text=f"Browser: {browser_name}", font=("Helvetica", 9)).pack(anchor="w")
+        ttk.Label(
+            details_frame,
+            text=f"Completed: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}",
+            font=("Helvetica", 9),
+        ).pack(anchor="w")
+
+        actions = ttk.Frame(self.smart_fill_content)
+        actions.pack(pady=16)
+        if error_count > 0:
+            ttk.Button(actions, text="View Error Log", command=self.view_error_log).pack(side="left", padx=5)
+            ttk.Button(actions, text="Retry Failed Rows", command=self.retry_failed_rows).pack(side="left", padx=5)
+        ttk.Button(actions, text="New Batch", command=self.show_import_screen).pack(side="left", padx=5)
+
+        ttk.Label(self.smart_fill_content, text="Recent batches", font=("Helvetica", 12, "bold")).pack(pady=(20, 10))
+        self.display_recent_batches()
+
+    def display_recent_batches(self):
+        batches = self.retry_manager.get_recent_batches(limit=5)
+        container = ttk.Frame(self.smart_fill_content)
+        container.pack(fill="x", padx=20)
+        if not batches:
+            ttk.Label(container, text="No batches yet.", foreground="gray").pack(anchor="w")
+            return
+        for batch in batches:
+            success = batch.get("successful", 0)
+            total = batch.get("total_rows", 0)
+            ts = batch.get("timestamp", "")[:19].replace("T", " ")
+            ttk.Label(container, text=f"- {ts}  {success}/{total} success").pack(anchor="w")
+
+    def view_error_log(self):
+        if not self.smart_fill_session.batch_id:
+            messagebox.showinfo("No Errors", "No batch error log is available.")
+            return
+        path = os.path.expanduser(f"~/Documents/Typestra/Errors/{self.smart_fill_session.batch_id}.csv")
+        if os.path.isfile(path):
+            messagebox.showinfo("Error Log", f"Error log file:\n{path}")
+        else:
+            messagebox.showinfo("Error Log", "No error log file found.")
+
+    def retry_failed_rows(self):
+        if not self.smart_fill_session.batch_id:
+            messagebox.showwarning("Retry", "No failed rows available to retry.")
+            return
+        saved_context = self.smart_fill_session.browser_context or BrowserContext().capture_context()
+        current_context = BrowserContext().capture_context()
+        context_status = self.context_verifier.verify_context(saved_context)
+        if context_status != "match":
+            proceed = self.context_verifier.show_context_warning(saved_context, current_context)
+            if not proceed:
+                return
+        error_path = os.path.expanduser(f"~/Documents/Typestra/Errors/{self.smart_fill_session.batch_id}.csv")
+        if not os.path.isfile(error_path):
+            messagebox.showinfo("Retry", "No error file found.")
+            return
+        errors = self.retry_manager.load_error_log(error_path)
+        if not errors:
+            messagebox.showinfo("Retry", "No retryable rows found.")
+            return
+        mapping = {"fields": self.smart_fill_session.field_mappings, "auto_advance": self.smart_fill_session.auto_advance.__dict__}
+        self.smart_fill_session = self.retry_manager.create_retry_session(errors, mapping)
+        self.smart_fill_session.csv_filename = "retry_errors.csv"
+        self.show_field_mapping_screen()
+        messagebox.showinfo("Retry Ready", f"Loaded {len(errors)} failed rows. Click Start Filling to retry.")
+
+    def pause_batch(self):
+        if not self.smart_fill_session.is_running:
+            return
+        if self.smart_fill_session.is_paused:
+            self.smart_fill_session.resume()
+            if hasattr(self, "pause_btn"):
+                self.pause_btn.config(text="Pause")
+        else:
+            self.smart_fill_session.pause()
+            if hasattr(self, "pause_btn"):
+                self.pause_btn.config(text="Resume")
+
+    def skip_current_row(self):
+        self.smart_fill_session.next_row_manual()
+        self.refresh_active_filling_screen()
+
+    def stop_batch(self):
+        self.smart_fill_session.stop()
+        self.status_label.config(text="Smart Fill stopped.")
+
+    def start_or_resume_smart_fill(self):
+        if self.smart_fill_session.csv_data is None:
+            self.notebook.select(self.smart_fill_frame)
+            self.show_import_screen()
+            return
+        if self.smart_fill_session.is_running:
+            self.smart_fill_session.resume()
+        else:
+            self.notebook.select(self.smart_fill_frame)
+            self.start_batch_execution()
+
+    def next_row_manual_smart_fill(self):
+        if self.smart_fill_session.is_running:
+            self.smart_fill_session.next_row_manual()
+            self.refresh_active_filling_screen()
+
+    def reset_to_row_zero(self):
+        self.smart_fill_session.reset()
+        if hasattr(self, "row_counter_label"):
+            self.refresh_active_filling_screen()
+
+    def mark_current_row_error(self):
+        if not self.smart_fill_session.is_running:
+            return
+        self.smart_fill_session.log_error(self.smart_fill_session.current_row, "manual_marked_error")
+        self.smart_fill_session.next_row_manual()
+        self.refresh_active_filling_screen()
+
+    def toggle_demo_mode(self):
+        if self.demo_mode.enabled:
+            self.demo_mode.disable()
+            self.status_label.config(text="Demo mode disabled.")
+            return
+
+        choice = simpledialog.askstring("Demo Mode", "Dataset: candidates, crm, invoices", initialvalue="candidates")
+        demo_type = (choice or "candidates").strip().lower()
+        if demo_type not in {"candidates", "crm", "invoices"}:
+            demo_type = "candidates"
+        self.demo_mode.enable(self.root, demo_type)
+        result = self.smart_fill_session.load_demo_csv(demo_type=demo_type)
+        if not result.get("success"):
+            messagebox.showerror("Demo Load Error", result.get("error", "Could not load demo dataset"))
+            return
+        self.status_label.config(text=f"Demo mode enabled ({demo_type}).")
+        self.notebook.select(self.smart_fill_frame)
+        self.show_field_mapping_screen()
+
+    def check_for_interrupted_session(self):
+        """
+        Check for interrupted session on app start.
+        """
+        resume_prompt = ResumePrompt()
+        saved_state = resume_prompt.check_for_interrupted_session()
+        if not saved_state:
+            return
+
+        action = resume_prompt.show_resume_dialog(saved_state, parent=self.root)
+        if action == "resume":
+            restored = self.restore_smart_fill_session(saved_state)
+            if restored:
+                self.notebook.select(1)
+                messagebox.showinfo(
+                    "Session Restored",
+                    f"Ready to resume from row {saved_state['current_row'] + 1}",
+                )
+
+        # Delete recovery file regardless of action.
+        resume_prompt.delete_recovery_file()
+
+    def on_wake_from_sleep(self):
+        """
+        Called when Mac wakes from sleep.
+        """
+        if hasattr(self, "smart_fill_session") and self.smart_fill_session.is_running:
+            self.smart_fill_session.save_state_to_disk()
+            self.smart_fill_session.stop()
+            messagebox.showwarning(
+                "Batch Interrupted",
+                "Smart Fill was interrupted by system sleep.\n\n"
+                "Progress has been saved. Restart Typestra to resume.",
+            )
+
+    def restore_smart_fill_session(self, saved_state):
+        """
+        Restore Smart Fill session from saved state.
+        """
+        csv_file = saved_state.get("csv_file", "")
+        if not csv_file:
+            return False
+        session = SmartFillSession()
+        result = session.load_csv(csv_file)
+        if not result.get("success"):
+            messagebox.showerror(
+                "Resume Failed",
+                f"Could not reload CSV file:\n{csv_file}",
+            )
+            return False
+
+        session.field_mappings = saved_state.get("field_mappings", [])
+        session.auto_advance_config = saved_state.get("auto_advance_config", {})
+        session.current_row = int(saved_state.get("current_row", 0))
+        session.batch_id = saved_state.get("batch_id")
+        session.browser_context = saved_state.get("browser_context")
+        self.smart_fill_session = session
+        self.show_field_mapping_screen()
+        return True
+
+    def show_resume_ready_screen(self, saved_state):
+        self.show_field_mapping_screen()
+        next_row = int(saved_state.get("current_row", 0)) + 1
+        total_rows = int(saved_state.get("total_rows", 0))
+        self.status_label.config(
+            text=f"Resume ready: row {next_row} of {total_rows}. Click Start Filling to continue."
+        )
+        messagebox.showinfo(
+            "Resume Ready",
+            f"Smart Fill session restored.\nReady to resume from row {next_row}.",
+        )
+
     def _on_close(self):
         """Persist settings and destroy the window."""
         self.save_settings()
+        if self.smart_fill_session.is_running:
+            self.smart_fill_session.save_state_to_disk()
+        if self.demo_mode.enabled:
+            self.demo_mode.disable()
         self.root.destroy()
 
     def _flash_status(self, message: str, ms: int = 1800):
@@ -683,6 +1489,13 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         seq_k = f"<{m}-k>"
         seq_ret = f"<{m}-Return>"
         seq_q = f"<{m}-q>"
+        seq_sf_start = f"<{m}-Shift-F>"
+        seq_sf_next = f"<{m}-Shift-N>"
+        seq_sf_pause = f"<{m}-Shift-P>"
+        seq_sf_stop = f"<{m}-Shift-S>"
+        seq_sf_reset = f"<{m}-Shift-R>"
+        seq_sf_error = f"<{m}-Shift-E>"
+        seq_sf_demo = f"<{m}-Shift-D>"
 
         w = self.text_input
         w.bindtags(("AutoFlowShortcuts",) + w.bindtags())
@@ -697,6 +1510,17 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.root.bind(seq_k, self._shortcut_clear)
         self.root.bind(seq_ret, self._shortcut_start)
         self.root.bind(seq_q, self._shortcut_quit)
+        self.root.bind(seq_sf_start, lambda e: (self.start_or_resume_smart_fill(), "break")[1])
+        self.root.bind(seq_sf_next, lambda e: (self.next_row_manual_smart_fill(), "break")[1])
+        self.root.bind(seq_sf_pause, lambda e: (self.pause_batch(), "break")[1])
+        self.root.bind(seq_sf_stop, lambda e: (self.stop_batch(), "break")[1])
+        self.root.bind(seq_sf_reset, lambda e: (self.reset_to_row_zero(), "break")[1])
+        self.root.bind(seq_sf_error, lambda e: (self.mark_current_row_error(), "break")[1])
+        self.root.bind(seq_sf_demo, lambda e: (self.toggle_demo_mode(), "break")[1])
+
+    def register_smart_fill_hotkeys(self):
+        """Smart Fill shortcuts are registered in _setup_keyboard_shortcuts."""
+        return
 
     def _on_slider_released(self, event=None):
         """Save after user releases a WPM / countdown / humanization slider."""
@@ -756,6 +1580,13 @@ EMERGENCY STOP: Move mouse to top-left corner"""
                 nav = "tab"
             self.nav_var.set(nav)
 
+            self.load_smart_fill_settings()
+            self.sf_global_auto_var.set(bool(self.smart_fill_settings.get("enabled", True)))
+            self.sf_global_delay_var.set(int(self.smart_fill_settings.get("delay_seconds", 3)))
+            self.sf_global_checkpoint_var.set(int(self.smart_fill_settings.get("checkpoint_every", 5)))
+            self.sf_global_timeout_var.set(int(self.smart_fill_settings.get("timeout_seconds", 10)))
+            self.sf_global_demo_var.set(bool(self.smart_fill_settings.get("demo_enabled", False)))
+
             geom = data.get("geometry")
             if isinstance(geom, str) and geom.strip():
                 try:
@@ -794,6 +1625,17 @@ EMERGENCY STOP: Move mouse to top-left corner"""
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, SETTINGS_PATH)
+            os.makedirs(os.path.dirname(SMART_FILL_SETTINGS_PATH), exist_ok=True)
+            sf_payload = {
+                "enabled": bool(self.sf_global_auto_var.get()),
+                "delay_seconds": int(self.sf_global_delay_var.get()),
+                "checkpoint_every": int(self.sf_global_checkpoint_var.get()),
+                "timeout_seconds": int(self.sf_global_timeout_var.get()),
+                "demo_enabled": bool(self.sf_global_demo_var.get()),
+            }
+            with open(SMART_FILL_SETTINGS_PATH, "w", encoding="utf-8") as sf:
+                json.dump(sf_payload, sf, indent=2)
+            self.smart_fill_settings = sf_payload
         except OSError:
             pass
 
@@ -1028,19 +1870,70 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             self.toggle_pause()
             # Show helpful message
             self.status_label.config(text="⏸ Auto-paused (you clicked AutoFlow). Click RESUME or press F8 to continue!")
+        if self.smart_fill_session.is_running and not self.smart_fill_session.is_paused:
+            self.smart_fill_session.pause()
+            self.status_label.config(text="Typestra paused (you switched apps/window focus).")
     
     def setup_hotkey_listener(self):
-        """Setup global F8 hotkey for pause/resume"""
+        """Setup global hotkeys for pause/resume and Smart Fill controls."""
+        self._pressed_keys = set()
+
+        key_map = {
+            "f": self.start_or_resume_smart_fill,
+            "n": self.next_row_manual_smart_fill,
+            "p": self.pause_batch,
+            "s": self.stop_batch,
+            "r": self.reset_to_row_zero,
+            "e": self.mark_current_row_error,
+            "d": self.toggle_demo_mode,
+        }
+
+        def normalize(key):
+            try:
+                return key.char.lower()
+            except Exception:
+                return str(key)
+
         def on_press(key):
             try:
                 if key == keyboard.Key.f8 and self.is_typing:
                     # Toggle pause when F8 is pressed
                     self.root.after(0, self.toggle_pause)
+                self._pressed_keys.add(normalize(key))
+                cmd_pressed = (
+                    "Key.cmd" in self._pressed_keys
+                    or "Key.cmd_l" in self._pressed_keys
+                    or "Key.cmd_r" in self._pressed_keys
+                    or "Key.ctrl" in self._pressed_keys
+                    or "Key.ctrl_l" in self._pressed_keys
+                    or "Key.ctrl_r" in self._pressed_keys
+                )
+                shift_pressed = (
+                    "Key.shift" in self._pressed_keys
+                    or "Key.shift_l" in self._pressed_keys
+                    or "Key.shift_r" in self._pressed_keys
+                )
+                if cmd_pressed and shift_pressed:
+                    char = None
+                    try:
+                        char = key.char.lower()
+                    except Exception:
+                        pass
+                    if char in key_map:
+                        self.root.after(0, key_map[char])
             except:
+                pass
+
+        def on_release(key):
+            try:
+                k = normalize(key)
+                if k in self._pressed_keys:
+                    self._pressed_keys.remove(k)
+            except Exception:
                 pass
         
         # Start listener in background thread
-        self.listener = keyboard.Listener(on_press=on_press)
+        self.listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.listener.daemon = True
         self.listener.start()
     

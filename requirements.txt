@@ -5,6 +5,7 @@ pynput==1.7.6
 pytesseract==0.3.10
 Pillow>=11.0.0
 requests==2.31.0
+pandas>=2.0.0
 
 # Backend API (Flask / Railway)
 Flask==3.0.0

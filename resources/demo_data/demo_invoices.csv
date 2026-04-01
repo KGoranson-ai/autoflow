@@ -1,0 +1,11 @@
+Invoice_Number,Date,Client_Name,Amount,Status
+INV-001,2026-03-01,Demo Client A,1250.00,Paid
+INV-002,2026-03-05,Demo Client B,3400.50,Pending
+INV-003,2026-03-08,Demo Client C,875.00,Paid
+INV-004,2026-03-12,Demo Client D,5200.00,Pending
+INV-005,2026-03-15,Demo Client E,1890.25,Paid
+INV-006,2026-03-18,Demo Client F,4100.00,Overdue
+INV-007,2026-03-22,Demo Client G,2300.75,Paid
+INV-008,2026-03-25,Demo Client H,6750.00,Pending
+INV-009,2026-03-28,Demo Client I,950.00,Paid
+INV-010,2026-03-30,Demo Client J,3850.50,Pending
