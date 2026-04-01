@@ -21,8 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _ed_debug(message: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    print(f"[TimeoutDetectorDebug {ts}] {message}", flush=True)
+    logger.debug(message)
 
 
 class TimeoutDetector:

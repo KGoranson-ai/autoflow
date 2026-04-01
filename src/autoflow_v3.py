@@ -5,6 +5,7 @@ Now with spreadsheet support for Excel and Google Sheets
 """
 
 import argparse
+import logging
 import platform
 import sys
 import tkinter as tk
@@ -55,6 +56,7 @@ OCR_MAX_FILE_BYTES = 10 * 1024 * 1024
 AUTOFLOW_DIR = os.path.join(os.path.expanduser("~"), ".autoflow")
 SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "settings.json")
 SMART_FILL_SETTINGS_PATH = os.path.expanduser("~/Documents/Typestra/Settings/smart_fill.json")
+logger = logging.getLogger(__name__)
 
 
 class OCREngine:
@@ -234,9 +236,7 @@ class SmartFillTypingAdapter:
         self.app = autoflow_app
 
     def _debug(self, message: str) -> None:
-        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        thread_name = threading.current_thread().name
-        print(f"[SmartFillTypingAdapter {ts} {thread_name}] {message}", flush=True)
+        logger.debug(message)
 
     def _build_engine(self) -> TypingEngine:
         config = TypingConfig(
@@ -296,7 +296,7 @@ class AutoFlow:
         self._is_mac = platform.system() == "Darwin"
         self._mod = "Command" if self._is_mac else "Control"
         self._status_flash_after_id = None
-        self.root.title("AutoFlow v3.0 - Professional Workflow Automation")
+        self.root.title("Typestra")
         self.root.geometry("850x900")
         self.root.resizable(True, True)
         

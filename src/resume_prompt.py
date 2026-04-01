@@ -43,7 +43,8 @@ class ResumePrompt:
     def show_resume_dialog(self, saved_state, parent=None):
         dialog = tk.Toplevel(parent)
         dialog.title("Interrupted Session")
-        dialog.geometry("450x280")
+        dialog.geometry("450x380")
+        dialog.minsize(450, 380)
         dialog.resizable(False, False)
         dialog.transient(parent)
         dialog.grab_set()

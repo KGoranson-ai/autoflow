@@ -19,8 +19,7 @@ class BrowserContext:
     """Capture frontmost app context and browser URL when available."""
 
     def _debug(self, message: str) -> None:
-        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        print(f"[BrowserContextDebug {ts}] {message}", flush=True)
+        logger.debug(message)
 
     def get_frontmost_app(self) -> str:
         if platform.system() != "Darwin":

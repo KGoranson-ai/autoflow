@@ -5,12 +5,16 @@ Uses pyautogui only for keystroke output.
 """
 
 import pyautogui
+import logging
 import time
 import random
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import List, Callable, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,8 +51,7 @@ class TypingEngine:
         self._on_status = on_status if on_status is not None else (lambda s: None)
 
     def _debug(self, message: str) -> None:
-        ts = time.strftime("%H:%M:%S")
-        print(f"[TypingEngineDebug {ts}] {message}", flush=True)
+        logger.debug(message)
 
     @staticmethod
     def normalize_special_chars(text: str) -> str:

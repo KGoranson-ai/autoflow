@@ -5,6 +5,7 @@ Smart Fill core orchestration for bulk form automation.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import random
@@ -23,13 +24,12 @@ from error_detection import ErrorLogger
 
 
 FieldConfig = Dict[str, Any]
+logger = logging.getLogger(__name__)
 
 
 def _sf_debug(message: str) -> None:
-    """Print verbose Smart Fill debug logs to terminal."""
-    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    thread_name = threading.current_thread().name
-    print(f"[SmartFillDebug {ts} {thread_name}] {message}", flush=True)
+    """Write verbose Smart Fill debug logs."""
+    logger.debug(message)
 
 
 class CSVImporter:
@@ -198,7 +198,7 @@ class SmartFillSession:
             self.preflight_active = True
             detected_browser_type = self._prepare_browser_focus_before_batch()
             self.preflight_active = False
-            print(f"[SmartFillDebug] POST-FOCUS is_paused={self.is_paused}")
+            _sf_debug(f"POST-FOCUS is_paused={self.is_paused}")
             if browser_cb:
                 browser_cb(detected_browser_type)
             _sf_debug(
@@ -220,7 +220,9 @@ class SmartFillSession:
             _sf_debug(
                 f"Entering main batch loop: current_row={self.current_row}, total_rows={len(self.csv_data)}"
             )
-            print(f"[SmartFillDebug] PRE-LOOP STATE: is_paused={self.is_paused}, is_running={self.is_running}")
+            _sf_debug(
+                f"PRE-LOOP STATE: is_paused={self.is_paused}, is_running={self.is_running}"
+            )
 
             while self.current_row < len(self.csv_data) and self.is_running:
                 _sf_debug(
@@ -234,12 +236,35 @@ class SmartFillSession:
                 if row_cb:
                     row_cb(self.current_row)
 
+                row_had_typing_exception = False
                 _sf_debug(f"Starting fill_current_row for row_index={self.current_row}")
-                self.fill_current_row(typing_engine)
+                try:
+                    self.fill_current_row(typing_engine)
+                except Exception as exc:
+                    row_had_typing_exception = True
+                    self.error_count += 1
+                    self.log_error(self.current_row, f"typing_exception:{type(exc).__name__}")
+                    _sf_debug(
+                        f"Typing exception in row_index={self.current_row}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    _sf_debug(traceback.format_exc())
+                    if self.auto_advance.stop_on_error:
+                        self.save_state_to_disk()
+                        self.stop()
+                        break
                 _sf_debug(f"Finished fill_current_row for row_index={self.current_row}")
 
+                if not row_had_typing_exception:
+                    # Success is based on typing completion; timeout detector is advisory only.
+                    self.success_count += 1
+                    _sf_debug(
+                        f"Row {self.current_row} counted as success "
+                        "(fill_current_row completed without typing exception)"
+                    )
+
                 _sf_debug(
-                    "Running error detector: "
+                    "Running error detector (advisory only): "
                     f"max_wait={self.auto_advance.timeout_seconds}, row_index={self.current_row}"
                 )
                 error_result = error_detector.detect_error(
@@ -248,15 +273,8 @@ class SmartFillSession:
                 _sf_debug(
                     f"Error detector result for row_index={self.current_row}: {error_result}"
                 )
-                if error_result != "success":
-                    self.error_count += 1
+                if error_result == "timeout_error":
                     self.log_error(self.current_row, error_result)
-                    if self.auto_advance.stop_on_error:
-                        self.save_state_to_disk()
-                        self.stop()
-                        break
-                else:
-                    self.success_count += 1
 
                 row_number = self.current_row + 1
                 self.auto_save_state_periodically()
@@ -269,6 +287,8 @@ class SmartFillSession:
                     if status_cb:
                         status_cb("Manual mode: waiting for Next Row command...")
                     self.wait_for_manual_advance()
+                if row_cb and self.is_running:
+                    row_cb(self.current_row)
 
         except Exception as exc:
             _sf_debug(f"FATAL execute_batch exception: {type(exc).__name__}: {exc}")
