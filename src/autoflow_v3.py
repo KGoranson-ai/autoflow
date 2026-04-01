@@ -729,50 +729,149 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             widget.destroy()
 
     def show_import_screen(self):
-        self._clear_smart_fill_content()
-        ttk.Label(
-            self.smart_fill_content,
+        """
+        STATE 1: No data loaded - FIXED LAYOUT
+        """
+        # Clear existing content
+        for widget in self.smart_fill_content.winfo_children():
+            widget.destroy()
+
+        # Main container with proper centering
+        main_container = ttk.Frame(self.smart_fill_content)
+        main_container.pack(expand=True, fill="both")
+
+        # Center everything vertically and horizontally
+        center_frame = ttk.Frame(main_container)
+        center_frame.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Icon/Title
+        title = ttk.Label(
+            center_frame,
             text="No Data Loaded",
-            font=("Helvetica", 18),
-        ).pack(pady=20)
-        ttk.Label(
-            self.smart_fill_content,
+            font=("Helvetica", 24, "bold"),
+        )
+        title.pack(pady=(0, 10))
+
+        # Subtitle
+        subtitle = ttk.Label(
+            center_frame,
             text="Load data to start Smart Fill automation",
-        ).pack(pady=10)
+            font=("Helvetica", 12),
+        )
+        subtitle.pack(pady=(0, 30))
 
-        btn_frame = ttk.Frame(self.smart_fill_content)
-        btn_frame.pack(pady=20)
-        ttk.Button(btn_frame, text="Import CSV File", width=28, command=self.import_csv_file).pack(pady=5)
-        ttk.Button(btn_frame, text="Paste from Clipboard", width=28, command=self.paste_from_clipboard).pack(pady=5)
-        ttk.Button(btn_frame, text="Toggle Demo Mode", width=28, command=self.toggle_demo_mode).pack(pady=5)
+        # Buttons frame
+        buttons_frame = ttk.Frame(center_frame)
+        buttons_frame.pack(pady=20)
 
-        ttk.Label(
-            self.smart_fill_content,
+        # Import CSV button
+        import_btn = ttk.Button(
+            buttons_frame,
+            text="📁 Import CSV File",
+            command=self.import_csv_file,
+            width=30,
+        )
+        import_btn.pack(pady=8)
+
+        # Paste from clipboard button
+        paste_btn = ttk.Button(
+            buttons_frame,
+            text="📋 Paste from Clipboard",
+            command=self.paste_from_clipboard,
+            width=30,
+        )
+        paste_btn.pack(pady=8)
+
+        # Demo mode button
+        demo_btn = ttk.Button(
+            buttons_frame,
+            text="🎭 Toggle Demo Mode",
+            command=self.toggle_demo_mode,
+            width=30,
+        )
+        demo_btn.pack(pady=8)
+
+        # Separator
+        ttk.Separator(center_frame, orient="horizontal").pack(fill="x", pady=30, padx=40)
+
+        # Recent mappings section
+        recent_label = ttk.Label(
+            center_frame,
             text="Recent Mappings",
             font=("Helvetica", 12, "bold"),
-        ).pack(pady=(30, 10))
-        self.display_recent_mappings()
+        )
+        recent_label.pack(pady=(10, 5))
 
-    def display_recent_mappings(self):
-        container = ttk.Frame(self.smart_fill_content)
-        container.pack(fill="x", padx=20)
-        mappings_dir = os.path.expanduser("~/Documents/Typestra/Mappings")
-        if not os.path.isdir(mappings_dir):
-            ttk.Label(container, text="No saved mappings yet.", foreground="gray").pack(anchor="w")
-            return
-        mapping_files = sorted(
-            [f for f in os.listdir(mappings_dir) if f.endswith(".json")],
-            reverse=True,
-        )[:5]
-        if not mapping_files:
-            ttk.Label(container, text="No saved mappings yet.", foreground="gray").pack(anchor="w")
-            return
-        for filename in mapping_files:
-            name = filename[:-5]
-            row = ttk.Frame(container)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=f"- {name}").pack(side="left")
-            ttk.Button(row, text="Load", command=lambda n=name: self.load_mapping_template(n)).pack(side="right")
+        # Recent mappings list
+        mappings_frame = ttk.Frame(center_frame)
+        mappings_frame.pack()
+
+        # Check for recent mappings
+        recent_mappings = self.get_recent_mappings()
+
+        if recent_mappings:
+            for mapping in recent_mappings[:3]:  # Show top 3
+                mapping_btn = ttk.Button(
+                    mappings_frame,
+                    text=f"• {mapping['name']}",
+                    command=lambda m=mapping: self.load_saved_mapping(m),
+                    width=30,
+                )
+                mapping_btn.pack(pady=2)
+        else:
+            no_mappings_label = ttk.Label(
+                mappings_frame,
+                text="No saved mappings yet.",
+                foreground="gray",
+                font=("Helvetica", 10),
+            )
+            no_mappings_label.pack()
+
+    def get_recent_mappings(self):
+        """Get list of recent mapping templates"""
+        mappings_dir = os.path.expanduser("~/Documents/Typestra/Mappings/")
+
+        if not os.path.exists(mappings_dir):
+            return []
+
+        # Get all .json files
+        mapping_files = []
+        for filename in os.listdir(mappings_dir):
+            if filename.endswith(".json"):
+                filepath = os.path.join(mappings_dir, filename)
+                mapping_files.append(
+                    {
+                        "name": filename.replace(".json", ""),
+                        "path": filepath,
+                        "modified": os.path.getmtime(filepath),
+                    }
+                )
+
+        # Sort by modification time, most recent first
+        mapping_files.sort(key=lambda x: x["modified"], reverse=True)
+
+        return mapping_files
+
+    def load_saved_mapping(self, mapping_info):
+        """Load a saved mapping template"""
+        try:
+            with open(mapping_info["path"], "r", encoding="utf-8") as f:
+                mapping_data = json.load(f)
+
+            # Load mapping into session
+            if hasattr(self, "smart_fill_session"):
+                self.smart_fill_session.field_mappings = mapping_data.get("fields", [])
+                self.smart_fill_session.auto_advance_config = mapping_data.get("auto_advance", {})
+
+            messagebox.showinfo(
+                "Mapping Loaded",
+                f"Loaded mapping: {mapping_info['name']}\n\nNow import a CSV to use this mapping.",
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Load Failed",
+                f"Could not load mapping:\n{str(e)}",
+            )
 
     def import_csv_file(self):
         filename = filedialog.askopenfilename(
@@ -804,44 +903,83 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             return
         self.show_field_mapping_screen()
 
-    def load_mapping_template(self, template_name):
-        try:
-            self.smart_fill_session.load_mapping(template_name)
-        except Exception as exc:
-            messagebox.showerror("Load Mapping Failed", str(exc))
-            return
-        if self.smart_fill_session.csv_data is None:
-            messagebox.showinfo("Mapping Loaded", "Mapping loaded. Import CSV data to apply it.")
-            return
-        self.show_field_mapping_screen()
-
     def show_field_mapping_screen(self):
-        self._clear_smart_fill_content()
+        """
+        STATE 2: Data loaded, map fields - FIXED LAYOUT
+        """
+        # Clear existing content
+        for widget in self.smart_fill_content.winfo_children():
+            widget.destroy()
+
+        # Top header - outside scrollable area so it is always visible.
         rows = len(self.smart_fill_session.csv_data) if self.smart_fill_session.csv_data is not None else 0
+        csv_name = os.path.basename(self.smart_fill_session.csv_filename) if self.smart_fill_session.csv_filename else "Imported CSV"
+        header_frame = ttk.Frame(self.smart_fill_content)
+        header_frame.pack(side="top", fill="x", pady=(10, 5))
         ttk.Label(
-            self.smart_fill_content,
-            text=f"Data: {self.smart_fill_session.csv_filename or 'Imported CSV'} ({rows} rows)",
-            font=("Helvetica", 12),
-        ).pack(pady=10)
+            header_frame,
+            text=f"Data: {csv_name} ({rows} rows)",
+            font=("Helvetica", 11),
+            anchor="center",
+        ).pack()
 
-        canvas = tk.Canvas(self.smart_fill_content)
-        scrollbar = ttk.Scrollbar(self.smart_fill_content, orient="vertical", command=canvas.yview)
-        scrollable = ttk.Frame(canvas)
-        scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scrollable, anchor="nw")
+        # Main content + fixed footer to avoid bottom empty space near action buttons.
+        content_area = ttk.Frame(self.smart_fill_content)
+        content_area.pack(fill="both", expand=True)
+
+        # Main scrollable container
+        canvas = tk.Canvas(content_area, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(content_area, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
 
-        ttk.Label(scrollable, text="FIELD MAPPING", font=("Helvetica", 12, "bold")).pack(pady=10)
+        # Field Mapping section header
+        mapping_label = ttk.Label(
+            scrollable_frame,
+            text="FIELD MAPPING",
+            font=("Helvetica", 11, "bold"),
+            anchor="center",
+        )
+        mapping_label.pack(pady=(10, 12), fill="x")
+
+        # Container for field mapping rows
+        self.sf_fields_container = ttk.Frame(scrollable_frame)
+        self.sf_fields_container.pack(padx=20, fill="x")
+
+        # Create field mapping rows
         self.field_mapping_widgets = []
-        existing_count = len([m for m in self.smart_fill_session.field_mappings if m]) or 5
+        existing_count = max(5, len([m for m in self.smart_fill_session.field_mappings if m]))
         for i in range(existing_count):
-            self.add_field_mapping_row(scrollable, i + 1)
+            self.add_field_mapping_row(self.sf_fields_container, i + 1)
 
-        ttk.Button(scrollable, text="+ Add Field", command=lambda: self.add_more_field(scrollable)).pack(pady=10)
-        ttk.Separator(scrollable, orient="horizontal").pack(fill="x", pady=15)
-        ttk.Label(scrollable, text="AUTOMATION SETTINGS", font=("Helvetica", 12, "bold")).pack(pady=8)
+        # Add Field button - centered
+        add_field_frame = ttk.Frame(scrollable_frame)
+        add_field_frame.pack(pady=14, fill="x")
+        add_field_btn = ttk.Button(
+            add_field_frame,
+            text="+ Add Field",
+            command=self.add_more_field,
+            width=20,
+        )
+        add_field_btn.pack()
+
+        # Separator
+        ttk.Separator(scrollable_frame, orient="horizontal").pack(fill="x", pady=18, padx=20)
+
+        # Automation Settings header
+        auto_label = ttk.Label(
+            scrollable_frame,
+            text="AUTOMATION SETTINGS",
+            font=("Helvetica", 11, "bold"),
+            anchor="center",
+        )
+        auto_label.pack(pady=(4, 12), fill="x")
+
+        # Settings container - centered with max width
+        settings_container = ttk.Frame(scrollable_frame)
+        settings_container.pack(padx=40, pady=(0, 12))
 
         self.sf_auto_advance_var = tk.BooleanVar(value=self.smart_fill_settings.get("enabled", True))
         self.sf_delay_var = tk.IntVar(value=int(self.smart_fill_settings.get("delay_seconds", 3)))
@@ -850,44 +988,110 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.sf_checkpoint_pause_var = tk.IntVar(value=int(self.smart_fill_settings.get("checkpoint_pause", 5)))
         self.sf_timeout_var = tk.IntVar(value=int(self.smart_fill_settings.get("timeout_seconds", 10)))
         self.sf_stop_on_error_var = tk.BooleanVar(value=bool(self.smart_fill_settings.get("stop_on_error", False)))
-        self.sf_action_var = tk.StringVar(value=self.smart_fill_settings.get("action", "next_row"))
+        self.sf_press_enter_var = tk.BooleanVar(value=self.smart_fill_settings.get("action", "next_row") == "submit_form")
+        self.sf_action_var = tk.StringVar(value="submit_form" if self.sf_press_enter_var.get() else "next_row")
         self.sf_demo_enabled_var = tk.BooleanVar(value=bool(self.smart_fill_settings.get("demo_enabled", False)))
 
-        ttk.Checkbutton(scrollable, text="Enable auto-advance to next row", variable=self.sf_auto_advance_var).pack(anchor="w", padx=20)
-        row1 = ttk.Frame(scrollable)
-        row1.pack(anchor="w", padx=40, pady=3)
-        ttk.Label(row1, text="Delay (seconds):").pack(side="left")
-        ttk.Spinbox(row1, from_=1, to=30, width=5, textvariable=self.sf_delay_var).pack(side="left", padx=6)
+        # Optional aliases for legacy/new naming compatibility.
+        self.auto_advance_var = self.sf_auto_advance_var
+        self.delay_var = self.sf_delay_var
+        self.press_enter_var = self.sf_press_enter_var
+        self.checkpoint_var = self.sf_checkpoint_var
+        self.checkpoint_rows_var = self.sf_checkpoint_every_var
+        self.checkpoint_pause_var = self.sf_checkpoint_pause_var
+        self.timeout_var = self.sf_timeout_var
+        self.stop_on_error_var = self.sf_stop_on_error_var
+        self.action_var = self.sf_action_var
+        self.demo_mode_var = self.sf_demo_enabled_var
 
-        row2 = ttk.Frame(scrollable)
-        row2.pack(anchor="w", padx=40, pady=3)
-        ttk.Label(row2, text="Action:").pack(side="left")
-        ttk.Radiobutton(row2, text="Next row", value="next_row", variable=self.sf_action_var).pack(side="left", padx=6)
-        ttk.Radiobutton(row2, text="Press Enter + next", value="submit_form", variable=self.sf_action_var).pack(side="left", padx=6)
+        auto_frame = ttk.Frame(settings_container)
+        auto_frame.grid(row=0, column=0, columnspan=4, sticky="w", pady=5)
+        ttk.Checkbutton(
+            auto_frame,
+            text="Auto-advance after filling",
+            variable=self.sf_auto_advance_var,
+        ).pack(side="left")
+        ttk.Label(auto_frame, text="(").pack(side="left", padx=(5, 0))
+        ttk.Spinbox(
+            auto_frame,
+            from_=1,
+            to=10,
+            textvariable=self.sf_delay_var,
+            width=5,
+        ).pack(side="left")
+        ttk.Label(auto_frame, text="second delay)").pack(side="left", padx=(2, 0))
 
         ttk.Checkbutton(
-            scrollable,
+            settings_container,
+            text="Press Enter after last field (submits form before advancing)",
+            variable=self.sf_press_enter_var,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 10), padx=(20, 0))
+
+        ttk.Checkbutton(
+            settings_container,
             text="Manual checkpoints",
             variable=self.sf_checkpoint_var,
-        ).pack(anchor="w", padx=20, pady=2)
-        row3 = ttk.Frame(scrollable)
-        row3.pack(anchor="w", padx=40, pady=3)
-        ttk.Label(row3, text="Every N rows:").pack(side="left")
-        ttk.Spinbox(row3, from_=1, to=50, width=5, textvariable=self.sf_checkpoint_every_var).pack(side="left", padx=6)
-        ttk.Label(row3, text="Pause seconds:").pack(side="left")
-        ttk.Spinbox(row3, from_=1, to=30, width=5, textvariable=self.sf_checkpoint_pause_var).pack(side="left", padx=6)
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(5, 5))
 
-        row4 = ttk.Frame(scrollable)
-        row4.pack(anchor="w", padx=20, pady=3)
-        ttk.Label(row4, text="Timeout seconds:").pack(side="left")
-        ttk.Spinbox(row4, from_=3, to=60, width=5, textvariable=self.sf_timeout_var).pack(side="left", padx=6)
-        ttk.Checkbutton(row4, text="Stop batch on error", variable=self.sf_stop_on_error_var).pack(side="left", padx=10)
-        ttk.Checkbutton(row4, text="Enable Demo Mode", variable=self.sf_demo_enabled_var).pack(side="left", padx=10)
+        ttk.Label(settings_container, text="    Every N rows:").grid(row=4, column=0, sticky="w", padx=(20, 5))
+        ttk.Spinbox(
+            settings_container,
+            from_=1,
+            to=50,
+            width=8,
+            textvariable=self.sf_checkpoint_every_var,
+        ).grid(row=4, column=1, sticky="w")
+        ttk.Label(settings_container, text="Pause seconds:").grid(row=4, column=2, sticky="w", padx=(10, 5))
+        ttk.Spinbox(
+            settings_container,
+            from_=1,
+            to=30,
+            width=8,
+            textvariable=self.sf_checkpoint_pause_var,
+        ).grid(row=4, column=3, sticky="w")
 
-        footer = ttk.Frame(self.smart_fill_content)
-        footer.pack(side="bottom", pady=12)
-        ttk.Button(footer, text="Save Mapping", command=self.save_mapping_dialog).pack(side="left", padx=5)
-        ttk.Button(footer, text="Start Filling", command=self.start_batch_execution).pack(side="left", padx=5)
+        additional_frame = ttk.Frame(settings_container)
+        additional_frame.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        ttk.Label(additional_frame, text="    Timeout seconds:").pack(side="left", padx=(0, 5))
+        ttk.Spinbox(
+            additional_frame,
+            from_=3,
+            to=60,
+            width=8,
+            textvariable=self.sf_timeout_var,
+        ).pack(side="left", padx=(0, 20))
+        ttk.Checkbutton(
+            additional_frame,
+            text="Stop batch on error",
+            variable=self.sf_stop_on_error_var,
+        ).pack(side="left", padx=(0, 15))
+        ttk.Checkbutton(
+            additional_frame,
+            text="Enable Demo Mode",
+            variable=self.sf_demo_enabled_var,
+        ).pack(side="left")
+
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Bottom button frame - fixed position
+        button_frame = ttk.Frame(self.smart_fill_content)
+        button_frame.pack(side="bottom", pady=12, fill="x")
+        button_container = ttk.Frame(button_frame)
+        button_container.pack()
+        ttk.Button(
+            button_container,
+            text="Save Mapping",
+            command=self.save_mapping_dialog,
+            width=18,
+        ).pack(side="left", padx=8)
+        ttk.Button(
+            button_container,
+            text="Start Filling",
+            command=self.start_batch_execution,
+            width=18,
+        ).pack(side="left", padx=8)
 
     def add_field_mapping_row(self, parent, field_num):
         row = ttk.Frame(parent, relief="groove", borderwidth=1, padding=6)
@@ -938,8 +1142,11 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             }
         )
 
-    def add_more_field(self, parent):
-        self.add_field_mapping_row(parent, len(self.field_mapping_widgets) + 1)
+    def add_more_field(self, parent=None):
+        target_parent = parent or getattr(self, "sf_fields_container", None)
+        if target_parent is None:
+            return
+        self.add_field_mapping_row(target_parent, len(self.field_mapping_widgets) + 1)
 
     def update_preview(self, field_num, column_name, preview_widget=None):
         widget = preview_widget
@@ -991,7 +1198,11 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         payload = {
             "enabled": bool(self.sf_auto_advance_var.get()) if hasattr(self, "sf_auto_advance_var") else True,
             "delay_seconds": int(self.sf_delay_var.get()) if hasattr(self, "sf_delay_var") else 3,
-            "action": self.sf_action_var.get() if hasattr(self, "sf_action_var") else "next_row",
+            "action": (
+                "submit_form"
+                if hasattr(self, "sf_press_enter_var") and bool(self.sf_press_enter_var.get())
+                else "next_row"
+            ),
             "checkpoint_enabled": bool(self.sf_checkpoint_var.get()) if hasattr(self, "sf_checkpoint_var") else True,
             "checkpoint_every": int(self.sf_checkpoint_every_var.get()) if hasattr(self, "sf_checkpoint_every_var") else 5,
             "checkpoint_pause": int(self.sf_checkpoint_pause_var.get()) if hasattr(self, "sf_checkpoint_pause_var") else 5,
@@ -1031,9 +1242,12 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.collect_field_mappings()
         self.save_smart_fill_settings()
 
+        action = "submit_form" if bool(self.sf_press_enter_var.get()) else "next_row"
+        self.sf_action_var.set(action)
+
         self.smart_fill_session.auto_advance.enabled = bool(self.sf_auto_advance_var.get())
         self.smart_fill_session.auto_advance.delay_seconds = int(self.sf_delay_var.get())
-        self.smart_fill_session.auto_advance.action = self.sf_action_var.get()
+        self.smart_fill_session.auto_advance.action = action
         self.smart_fill_session.auto_advance.timeout_seconds = int(self.sf_timeout_var.get())
         self.smart_fill_session.auto_advance.stop_on_error = bool(self.sf_stop_on_error_var.get())
 
