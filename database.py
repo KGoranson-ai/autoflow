@@ -84,6 +84,12 @@ class Subscription(Base):
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(subscription_status_enum, nullable=False)
+    is_trial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    trial_end: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    converted_from_trial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     current_period_end: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -169,6 +175,29 @@ class Referral(Base):
         nullable=False,
     )
     self_referral_attempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class TrialRequest(Base):
+    __tablename__ = "trial_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    tier: Mapped[str] = mapped_column(subscription_tier_enum, nullable=False)
+    license_key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    trial_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    converted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -15,7 +15,7 @@ from flask import Flask, current_app, jsonify, request
 from flask_cors import CORS
 from sqlalchemy.orm import sessionmaker
 
-from database import Affiliate, Referral, init_db, create_engine_from_env
+from database import Affiliate, Referral, TrialRequest, init_db, create_engine_from_env
 from license import validate_license
 
 load_dotenv()
@@ -26,6 +26,23 @@ DEFAULT_DOWNLOAD_URL = os.environ.get(
     "DOWNLOAD_URL",
     "https://typestra.com/download",
 )
+
+# Map frontend tier IDs to Stripe price IDs (monthly)
+STRIPE_PRICE_MAP = {
+    "solo": os.environ.get("STRIPE_PRICE_SOLO"),
+    "pro": os.environ.get("STRIPE_PRICE_PRO"),
+    "team": os.environ.get("STRIPE_PRICE_TEAM"),
+}
+
+# Map frontend tier IDs to Stripe price IDs (annual)
+STRIPE_PRICE_MAP_ANNUAL = {
+    "solo": os.environ.get("STRIPE_PRICE_SOLO_ANNUAL"),
+    "pro": os.environ.get("STRIPE_PRICE_PRO_ANNUAL"),
+    "team": os.environ.get("STRIPE_PRICE_TEAM_ANNUAL"),
+}
+
+# Trial duration in days
+TRIAL_DAYS = 7
 
 
 def create_app() -> Flask:
@@ -113,15 +130,13 @@ def create_app() -> Flask:
         try:
             data = request.get_json()
             tier = data.get("tier")
+            billing = data.get("billing", "monthly")  # "monthly" or "annual"
             ref_code = data.get("ref_code")
-            price_map = {
-                "basic": os.environ.get("STRIPE_PRICE_BASIC"),
-                "pro": os.environ.get("STRIPE_PRICE_PRO"),
-                "premium": os.environ.get("STRIPE_PRICE_PREMIUM"),
-            }
+
+            price_map = STRIPE_PRICE_MAP_ANNUAL if billing == "annual" else STRIPE_PRICE_MAP
             price_id = price_map.get(tier)
             if not price_id:
-                return jsonify({"error": "Invalid tier"}), 400
+                return jsonify({"error": "Invalid tier or billing cycle"}), 400
 
             discount_percent = 0
             if ref_code:
@@ -158,7 +173,7 @@ def create_app() -> Flask:
                 payment_method_types=["card"],
                 line_items=[{"price": price_id, "quantity": 1}],
                 mode="subscription",
-                metadata={"tier": tier, "ref_code": ref_code or ""},
+                metadata={"tier": tier, "billing": billing, "ref_code": ref_code or ""},
                 discounts=discounts if discounts else None,
                 success_url="https://typestra.com/download?session_id={CHECKOUT_SESSION_ID}",
                 cancel_url="https://typestra.com/pricing",
@@ -167,6 +182,182 @@ def create_app() -> Flask:
         except Exception as e:
             logger.error(f"Checkout session error: {e}")
             return jsonify({"error": "Failed to create checkout session"}), 500
+
+    @app.route("/api/start-trial", methods=["POST"])
+    def start_trial():
+        """Start a 7-day free trial. Creates a license key valid for 7 days and emails it."""
+        try:
+            data = request.get_json()
+            email = (data.get("email") or "").strip().lower()
+            tier = data.get("tier", "solo")
+
+            if not email or "@" not in email:
+                return jsonify({"error": "A valid email address is required"}), 400
+
+            if tier not in STRIPE_PRICE_MAP:
+                return jsonify({"error": "Invalid tier. Must be solo, pro, or team."}), 400
+
+            Session = current_app.config.get("db_session")
+            if not Session:
+                return jsonify({"error": "Service unavailable"}), 503
+
+            s = Session()
+            try:
+                from sqlalchemy import select
+                from license import generate_license_key, hash_license_key
+
+                # Check for existing trial by this email
+                existing_trial = s.execute(
+                    select(TrialRequest)
+                    .where(TrialRequest.email == email, TrialRequest.converted == False)
+                ).scalar_one_or_none()
+
+                if existing_trial:
+                    # Check if trial is still active
+                    if existing_trial.trial_end > datetime.now(timezone.utc):
+                        return jsonify({
+                            "error": "You already have an active trial. Check your email for your license key."
+                        }), 409
+                    # Trial expired and not converted — allow re-trial or prompt convert
+                    return jsonify({
+                        "error": "Your trial has ended. Subscribe to continue using Typestra.",
+                        "trial_expired": True,
+                    }), 410
+
+                # Generate trial license
+                salt = os.environ.get("LICENSE_SALT", "")
+                trial_key = generate_license_key()
+                key_hash = hash_license_key(trial_key, salt)
+                trial_end = datetime.now(timezone.utc) + timedelta(days=TRIAL_DAYS)
+
+                trial_request = TrialRequest(
+                    email=email,
+                    tier=tier,
+                    license_key_hash=key_hash,
+                    trial_end=trial_end,
+                    converted=False,
+                )
+                s.add(trial_request)
+                s.commit()
+
+                # Email the trial license key
+                resend.api_key = os.environ.get("RESEND_API_KEY")
+                resend.Emails.send({
+                    "from": "Typestra <noreply@typestra.com>",
+                    "to": [email],
+                    "subject": "Your Typestra Free Trial — 7 Days Free",
+                    "html": f"""
+                    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+                        <h2>Start your Typestra trial 🎉</h2>
+                        <p>Your 7-day free trial is active. Here's your license key:</p>
+                        <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 22px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px; margin: 20px 0;">
+                            {trial_key}
+                        </div>
+                        <p><strong>Your trial ends:</strong> {trial_end.strftime('%B %d, %Y')}</p>
+                        <p>To activate:</p>
+                        <ol>
+                            <li>Download Typestra at <a href="https://typestra.com/download">typestra.com/download</a></li>
+                            <li>Open the app and click Activate</li>
+                            <li>Enter your license key</li>
+                        </ol>
+                        <p>After your trial, you can subscribe starting at $19/month. We'll remind you before your trial ends.</p>
+                        <p>Questions? Reply to this email or contact support@typestra.com</p>
+                    </div>
+                    """,
+                })
+
+                logger.info(f"Trial started for {email}, tier={tier}, expires={trial_end.date()}")
+                return jsonify({
+                    "status": "trial_started",
+                    "trial_end": trial_end.isoformat(),
+                    "tier": tier,
+                }), 200
+
+            except Exception as e:
+                s.rollback()
+                logger.error(f"Start trial error: {e}")
+                return jsonify({"error": "Failed to start trial. Please try again."}), 500
+            finally:
+                s.close()
+
+        except Exception as e:
+            logger.error(f"Start trial request error: {e}")
+            return jsonify({"error": "Invalid request"}), 400
+
+    @app.route("/api/convert-trial", methods=["POST"])
+    def convert_trial():
+        """Convert an existing trial to a paid subscription. Runs Stripe checkout with the trial's license key pre-filled."""
+        try:
+            data = request.get_json()
+            email = (data.get("email") or "").strip().lower()
+            tier = data.get("tier", "solo")
+            billing = data.get("billing", "monthly")
+
+            if not email or "@" not in email:
+                return jsonify({"error": "A valid email address is required"}), 400
+
+            if tier not in STRIPE_PRICE_MAP:
+                return jsonify({"error": "Invalid tier"}), 400
+
+            Session = current_app.config.get("db_session")
+            if not Session:
+                return jsonify({"error": "Service unavailable"}), 503
+
+            s = Session()
+            try:
+                from sqlalchemy import select
+
+                # Verify trial exists and isn't already converted
+                trial = s.execute(
+                    select(TrialRequest).where(
+                        TrialRequest.email == email,
+                        TrialRequest.converted == False,
+                    )
+                ).scalar_one_or_none()
+
+                if not trial:
+                    # No trial found — redirect to normal checkout
+                    return jsonify({"error": "No active trial found for this email"}), 404
+
+                if trial.trial_end <= datetime.now(timezone.utc):
+                    return jsonify({
+                        "error": "Your trial has expired. Please subscribe to continue.",
+                        "trial_expired": True,
+                    }), 410
+
+                # Create Stripe checkout session for the paid conversion
+                price_map = STRIPE_PRICE_MAP_ANNUAL if billing == "annual" else STRIPE_PRICE_MAP
+                price_id = price_map.get(tier)
+                if not price_id:
+                    return jsonify({"error": "Invalid billing cycle"}), 400
+
+                stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+                checkout_session = stripe.checkout.Session.create(
+                    payment_method_types=["card"],
+                    line_items=[{"price": price_id, "quantity": 1}],
+                    mode="subscription",
+                    metadata={
+                        "tier": tier,
+                        "billing": billing,
+                        "trial_email": email,
+                        "ref_code": "",
+                    },
+                    success_url="https://typestra.com/download?session_id={CHECKOUT_SESSION_ID}&converted_trial=1",
+                    cancel_url="https://typestra.com/pricing",
+                )
+
+                logger.info(f"Trial conversion checkout created for {email}")
+                return jsonify({"url": checkout_session.url}), 200
+
+            except Exception as e:
+                logger.error(f"Convert trial error: {e}")
+                return jsonify({"error": "Failed to start conversion. Please try again."}), 500
+            finally:
+                s.close()
+
+        except Exception as e:
+            logger.error(f"Convert trial request error: {e}")
+            return jsonify({"error": "Invalid request"}), 400
 
     @app.route("/api/webhook/stripe", methods=["POST"])
     def stripe_webhook():

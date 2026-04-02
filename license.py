@@ -11,6 +11,7 @@ import logging
 import os
 import secrets
 from typing import Any, Optional
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Uppercase alphanumeric, excluding 0, O, 1, I, L (31 symbols → 16 chars via secrets).
 _LICENSE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 
-_VALID_TIERS = frozenset({"basic", "pro", "premium"})
+_VALID_TIERS = frozenset({"solo", "pro", "team"})
 
 _MAX_KEY_GENERATION_ATTEMPTS = 32
 
@@ -144,18 +145,20 @@ def validate_license(
     """
     Validate a license key, log the attempt, return outcome.
 
-    Uses the same normalization as ``hash_license_key``. ``salt`` should match
-    deployment hashing (typically ``LICENSE_SALT`` from the environment).
+    Checks both Subscription table (paid licenses) and TrialRequest table
+    (active trial licenses).
 
     Caller is responsible for ``session.commit()`` so the audit row is persisted.
 
     Returns:
-        ``{"valid": bool, "tier": str | None, "expires": str | None}``
-        ``expires`` is ISO 8601 from ``current_period_end``, or ``None``.
+        ``{"valid": bool, "tier": str | None, "expires": str | None,
+           "is_trial": bool}``
+        ``expires`` is ISO 8601 from ``current_period_end`` (paid) or
+        ``trial_end`` (trial). ``is_trial`` is True for trial licenses.
     """
     tier: Optional[str] = None
     expires: Optional[str] = None
-    valid = False
+    is_trial = False
 
     try:
         if not license_key or not str(license_key).strip():
@@ -164,22 +167,44 @@ def validate_license(
     except ValueError as e:
         logger.info("validate_license: invalid key input: %s", e)
         _log_validation(session, _PLACEHOLDER_KEY_HASH, False, ip_address=ip_address)
-        return {"valid": False, "tier": None, "expires": None}
+        return {"valid": False, "tier": None, "expires": None, "is_trial": False}
 
+    # 1. Check paid subscriptions
     sub = session.execute(
         select(Subscription).where(Subscription.license_key_hash == key_hash)
     ).scalar_one_or_none()
 
-    if sub is not None and sub.status == "active":
-        valid = True
-        tier = sub.tier
-        if sub.current_period_end is not None:
-            expires = sub.current_period_end.isoformat()
+    if sub is not None:
+        if sub.status == "active":
+            valid = True
+            tier = sub.tier
+            if sub.current_period_end is not None:
+                expires = sub.current_period_end.isoformat()
+            else:
+                expires = None
         else:
-            expires = None
-    else:
-        if sub is not None:
+            valid = False
             logger.debug("validate_license: subscription not active (status=%s)", sub.status)
+
+    # 2. Check active trial licenses
+    if not valid:
+        from database import TrialRequest
+        trial = session.execute(
+            select(TrialRequest).where(
+                TrialRequest.license_key_hash == key_hash,
+                TrialRequest.converted == False,
+            )
+        ).scalar_one_or_none()
+
+        if trial is not None:
+            if trial.trial_end > datetime.now(timezone.utc):
+                valid = True
+                is_trial = True
+                tier = trial.tier
+                expires = trial.trial_end.isoformat()
+            else:
+                # Trial expired — treat as invalid
+                logger.debug("validate_license: trial expired (trial_end=%s)", trial.trial_end)
 
     _log_validation(session, key_hash, valid, ip_address=ip_address)
 
@@ -187,6 +212,7 @@ def validate_license(
         "valid": valid,
         "tier": tier,
         "expires": expires,
+        "is_trial": is_trial,
     }
 
 
