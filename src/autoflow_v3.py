@@ -2369,6 +2369,8 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         
     def on_window_focus(self, event):
         """Auto-pause when user clicks on AutoFlow window"""
+        if self.smart_fill_session.is_running:
+            return
         if self.is_typing and not self.is_paused:
             self.toggle_pause()
             # Show helpful message

@@ -340,12 +340,30 @@ class SmartFillSession:
         )
         return browser_type_after
 
+    def _activate_chrome_before_field(self) -> None:
+        """Ensure Chrome is frontmost before sending field keystrokes."""
+        if platform.system() != "Darwin":
+            return
+        script = 'tell application "Google Chrome" to activate'
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _sf_debug(
+            "Per-field Chrome activate result: "
+            f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
+            f"stderr={result.stderr.strip()!r}"
+        )
+
     def fill_current_row(self, typing_engine: Any) -> None:
         _sf_debug(f"ENTER fill_current_row row_index={self.current_row}")
         _sf_debug(
             f"fill_current_row enter: row_index={self.current_row}, "
             f"mapped_fields={len(self.field_mappings)}"
         )
+        self._activate_chrome_before_field()
         for position, field_config in enumerate(self.field_mappings, start=1):
             _sf_debug(f"Field position={position} config={field_config}")
             if not field_config:
