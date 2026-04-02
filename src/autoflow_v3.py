@@ -1,5 +1,6 @@
 """
 AutoFlow v3.0 - Typing & Spreadsheet Automation
+import webbrowser
 Professional workflow automation with human-like typing patterns
 Now with spreadsheet support for Excel and Google Sheets
 """
@@ -21,7 +22,7 @@ import os
 import re
 import unicodedata
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Callable
 
 from typing_engine import TypingEngine, TypingConfig
 from smart_fill import SmartFillSession
@@ -32,31 +33,8 @@ from demo_mode import DemoMode
 from firefox_warning import FirefoxWarningDialog
 from sleep_wake_detector import SleepWakeDetector
 from resume_prompt import ResumePrompt
-
-# Try to import pynput for global hotkeys
-try:
-    from pynput import keyboard
-    PYNPUT_AVAILABLE = sys.version_info < (3, 13)
-except ImportError:
-    PYNPUT_AVAILABLE = False
-
-# Try to import OCR dependencies
-try:
-    import pytesseract
-    from PIL import Image
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-
-
-# Max file size for OCR (10MB)
-OCR_MAX_FILE_BYTES = 10 * 1024 * 1024
-
-# Persistent user settings (~/.autoflow/settings.json)
-AUTOFLOW_DIR = os.path.join(os.path.expanduser("~"), ".autoflow")
-SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "settings.json")
-SMART_FILL_SETTINGS_PATH = os.path.expanduser("~/Documents/Typestra/Settings/smart_fill.json")
-logger = logging.getLogger(__name__)
+from license_manager import LicenseManager, FeatureGate
+from upgrade_prompt import UpgradeDialog, TrialCountdownBanner
 
 
 class OCREngine:
@@ -297,6 +275,23 @@ class AutoFlow:
         self._mod = "Command" if self._is_mac else "Control"
         self._status_flash_after_id = None
         self.root.title("Typestra")
+
+        # ── Menu bar ────────────────────────────────────────────────────────────
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_close)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="Activate License…", command=self.activate_license)
+        help_menu.add_separator()
+        help_menu.add_command(label="Pricing", command=lambda: webbrowser.open_new_tab("https://typestra.com/pricing"))
+        help_menu.add_command(label="Support", command=lambda: webbrowser.open_new_tab("mailto:support@typestra.com"))
+
         self.root.geometry("850x900")
         self.root.resizable(True, True)
         
@@ -346,6 +341,222 @@ class AutoFlow:
         )
         self.root.after(200, self.check_for_interrupted_session)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # ── License management ────────────────────────────────────────────────
+        self.license_manager = LicenseManager()
+        self._trial_banner: Optional[tk.Widget] = None
+        self._trial_dismissed = False
+        self._license_checked = False
+        # Check license after UI is fully rendered
+        self.root.after(300, self._check_license_on_startup)
+
+    # ── License / activation ───────────────────────────────────────────────────
+
+    def _check_license_on_startup(self) -> None:
+        """Run on app launch: validate stored key and show appropriate UI."""
+        self._license_checked = True
+        key = self.license_manager.get_stored_key()
+        if not key:
+            self._show_activation_prompt()
+            return
+
+        info = self.license_manager.validate_and_check_trial()
+        if info.valid:
+            if info.is_trial:
+                self._show_trial_banner(info.days_remaining)
+            self._update_app_title(info)
+        elif info.error in ("Trial expired",) or (info.is_trial and info.days_remaining <= 0):
+            self._show_expired_dialog()
+        else:
+            # Key stored but invalid
+            self._show_invalid_license_dialog(info.error or "Unknown error")
+
+    def _show_activation_prompt(self) -> None:
+        """No key found — show the Activate menu item in the status bar."""
+        self.status_label.config(
+            text="⚠ No license key. Click 'Activate' in the menu to start your free trial.",
+            foreground="orange",
+        )
+
+    def _show_trial_banner(self, days_remaining: int) -> None:
+        """Show dismissible countdown banner at the top of the main window."""
+        if self._trial_dismissed:
+            return
+        if self._trial_banner is not None:
+            try:
+                self._trial_banner.pack_forget()
+            except tk.TclError:
+                pass
+        self._trial_banner = TrialCountdownBanner(
+            parent=self.root,
+            days_remaining=days_remaining,
+            on_upgrade_click=self._open_pricing,
+            on_dismiss=lambda: setattr(self, "_trial_dismissed", True),
+        )
+        self._trial_banner.pack(fill="x", side="top")
+
+    def _show_expired_dialog(self) -> None:
+        """Trial ran out — modal dialog forces upgrade or exit."""
+        def _on_upgrade():
+            self._open_pricing()
+
+        def _on_enter_license():
+            self._show_enter_license_dialog(reason="trial_expired")
+
+        UpgradeDialog(
+            self.root,
+            reason="trial_expired",
+            on_upgrade=_on_upgrade,
+            on_enter_license=_on_enter_license,
+        )
+
+    def _show_invalid_license_dialog(self, error: str) -> None:
+        def _on_upgrade():
+            self._open_pricing()
+
+        def _on_enter_license():
+            self._show_enter_license_dialog(reason="invalid_license")
+
+        UpgradeDialog(
+            self.root,
+            reason="invalid_license",
+            on_upgrade=_on_upgrade,
+            on_enter_license=_on_enter_license,
+        )
+
+    def _show_enter_license_dialog(
+        self,
+        reason: str = "feature_blocked",
+        feature_name: Optional[str] = None,
+    ) -> None:
+        """Ask user for a license key, validate it, and update state."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Enter License Key")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.transient(self.root)
+        dialog.geometry("500x160")
+        dialog.update_idletasks()
+        px = self.root.winfo_rootx() + (self.root.winfo_width() - 500) // 2
+        py = self.root.winfo_rooty() + (self.root.winfo_height() - 160) // 2
+        dialog.geometry(f"+{px}+{py}")
+
+        outer = ttk.Frame(dialog, padding=20)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text="Enter your Typestra license key:", font=("Arial", 11)).pack(pady=(0, 10))
+        key_var = tk.StringVar()
+        entry = ttk.Entry(outer, textvariable=key_var, font=("Courier", 12), width=36)
+        entry.pack(pady=(0, 12))
+        entry.focus_set()
+
+        result_info: dict = {}
+
+        def _submit() -> None:
+            raw_key = key_var.get().strip()
+            if not raw_key:
+                return
+            dialog.config(cursor="watch")
+            # Validate synchronously in a thread so UI stays responsive
+            def _validate():
+                self.license_manager.store_key(raw_key)
+                info = self.license_manager.validate(force=True)
+                result_info["info"] = info
+                self.root.after(0, _handle_result, info)
+
+            def _handle_result(info):
+                dialog.config(cursor="")
+                if info.valid:
+                    dialog.grab_release()
+                    dialog.destroy()
+                    self._on_license_activated(info)
+                else:
+                    messagebox.showwarning(
+                        "Invalid Key",
+                        f"The license key could not be validated.\n\n{info.error or 'Please check your key and try again.'}",
+                        parent=dialog,
+                    )
+                    entry.delete(0, tk.END)
+                    entry.focus_set()
+
+            threading.Thread(target=_validate, daemon=True).start()
+
+        btn_frame = ttk.Frame(outer)
+        btn_frame.pack()
+        ttk.Button(btn_frame, text="Activate", command=_submit, width=14).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy, width=14).pack(side="left")
+
+        def _on_return(event):
+            _submit()
+        entry.bind("<Return>", _on_return)
+
+    def _on_license_activated(self, info) -> None:
+        """Called after a successful activation / trial start."""
+        # Remove trial banner if present
+        if self._trial_banner is not None:
+            try:
+                self._trial_banner.pack_forget()
+            except tk.TclError:
+                pass
+            self._trial_banner = None
+        self._trial_dismissed = False
+
+        if info.is_trial:
+            self._show_trial_banner(info.days_remaining)
+            self.status_label.config(
+                text=f"✅ Trial activated — {info.days_remaining} days remaining. Enjoy!",
+                foreground="green",
+            )
+        else:
+            self.status_label.config(
+                text=f"✅ License active ({info.tier.title()} tier). Thank you!",
+                foreground="green",
+            )
+        self._update_app_title(info)
+
+    def _update_app_title(self, info) -> None:
+        """Update the window title to show the active tier."""
+        if info.valid and info.tier:
+            tier_label = info.tier.title()
+            if info.is_trial:
+                self.root.title(f"Typestra — {tier_label} Trial")
+            else:
+                self.root.title(f"Typestra — {tier_label}")
+        else:
+            self.root.title("Typestra")
+
+    def _open_pricing(self) -> None:
+        """Open the Typestra pricing page in the default browser."""
+        import webbrowser
+        webbrowser.open_new_tab("https://typestra.com/pricing")
+
+    def _show_upgrade_dialog(
+        self,
+        feature_name: str,
+        tier_required: str = "Pro",
+    ) -> None:
+        """Show upgrade prompt for a Pro/Team-only feature."""
+        def _on_upgrade():
+            self._open_pricing()
+
+        def _on_enter_license():
+            self._show_enter_license_dialog(
+                reason="feature_blocked",
+                feature_name=feature_name,
+            )
+
+        UpgradeDialog(
+            self.root,
+            reason="feature_blocked",
+            feature_name=feature_name,
+            tier_required=tier_required,
+            on_upgrade=_on_upgrade,
+            on_enter_license=_on_enter_license,
+        )
+
+    def activate_license(self) -> None:
+        """Menu callback: open the license entry dialog."""
+        self._show_enter_license_dialog()
 
     def create_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -856,7 +1067,7 @@ EMERGENCY STOP: Move mouse to top-left corner"""
 
     def get_recent_mappings(self):
         """Get list of recent mapping templates"""
-        mappings_dir = os.path.expanduser("~/Documents/Typestra/Mappings/")
+        mappings_dir = os.path.expanduser("~/Documents/Typestra/Settings/")
 
         if not os.path.exists(mappings_dir):
             return []
@@ -1091,11 +1302,6 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             additional_frame,
             text="Stop batch on error",
             variable=self.sf_stop_on_error_var,
-        ).pack(side="left", padx=(0, 15))
-        ttk.Checkbutton(
-            additional_frame,
-            text="Enable Demo Mode",
-            variable=self.sf_demo_enabled_var,
         ).pack(side="left")
 
         # Pack canvas and scrollbar
@@ -1927,11 +2133,11 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             os.replace(tmp_path, SETTINGS_PATH)
             os.makedirs(os.path.dirname(SMART_FILL_SETTINGS_PATH), exist_ok=True)
             sf_payload = {
-                "enabled": bool(self.sf_global_auto_var.get()),
-                "delay_seconds": int(self.sf_global_delay_var.get()),
-                "checkpoint_every": int(self.sf_global_checkpoint_var.get()),
-                "timeout_seconds": int(self.sf_global_timeout_var.get()),
-                "demo_enabled": bool(self.sf_global_demo_var.get()),
+                "enabled": bool(self.sf_auto_advance_var.get()),
+                "delay_seconds": int(self.sf_delay_var.get()),
+                "checkpoint_every": int(self.sf_checkpoint_every_var.get()),
+                "timeout_seconds": int(self.sf_timeout_var.get()),
+                "demo_enabled": bool(self.sf_demo_enabled_var.get()),
             }
             with open(SMART_FILL_SETTINGS_PATH, "w", encoding="utf-8") as sf:
                 json.dump(sf_payload, sf, indent=2)
@@ -2056,9 +2262,6 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         ext = os.path.splitext(path)[1].lower()
         if ext not in OCREngine.get_supported_formats():
             messagebox.showerror("Error", f"Unsupported file type: {ext}\nSupported: {', '.join(OCREngine.get_supported_formats())}")
-            return
-        if ext == ".pdf":
-            messagebox.showerror("Error", "PDF support coming soon. Please use an image file (.jpg, .png, .gif, .bmp).")
             return
         # Validate file size (10MB)
         try:
