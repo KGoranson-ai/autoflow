@@ -24,6 +24,12 @@ import unicodedata
 from datetime import datetime
 from typing import List, Tuple, Optional, Callable
 
+try:
+    import pynput
+    PYNPUT_AVAILABLE = sys.version_info < (3, 13)
+except ImportError:
+    PYNPUT_AVAILABLE = False
+
 from typing_engine import TypingEngine, TypingConfig
 from smart_fill import SmartFillSession
 from error_detection import TimeoutDetector, CheckpointManager
@@ -33,8 +39,14 @@ from demo_mode import DemoMode
 from firefox_warning import FirefoxWarningDialog
 from sleep_wake_detector import SleepWakeDetector
 from resume_prompt import ResumePrompt
-from license_manager import LicenseManager, FeatureGate
+from license_manager import AUTOFLOW_DIR, LicenseManager
 from upgrade_prompt import UpgradeDialog, TrialCountdownBanner
+
+logger = logging.getLogger(__name__)
+
+# Persisted preferences (~/.autoflow/, same root as license key cache)
+SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "settings.json")
+SMART_FILL_SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "smart_fill_settings.json")
 
 
 class OCREngine:
@@ -237,7 +249,7 @@ class SmartFillTypingAdapter:
         return TypingEngine(
             config,
             should_stop=lambda: self.app.should_stop or not self.app.smart_fill_session.is_running,
-            is_paused=lambda: self.app.is_paused or self.app.smart_fill_session.is_paused,
+            is_paused=lambda: self.app.smart_fill_session.is_paused,
             on_status=lambda s: self.app.root.after(0, lambda: self.app.status_label.config(text=s)),
         )
 
@@ -1512,6 +1524,8 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.show_active_filling_screen()
         self.register_smart_fill_hotkeys()
         # Must be set immediately before thread start to avoid focus/hotkey races.
+        self.should_stop = False
+        self.is_paused = False
         self.smart_fill_session.is_paused = False
         self.smart_fill_session.is_running = True
         self.smart_fill_thread.start()
@@ -2383,6 +2397,8 @@ EMERGENCY STOP: Move mouse to top-left corner"""
     
     def setup_hotkey_listener(self):
         """Setup global hotkeys for pause/resume and Smart Fill controls."""
+        from pynput import keyboard
+
         self._pressed_keys = set()
 
         key_map = {

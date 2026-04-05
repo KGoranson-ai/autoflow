@@ -44,11 +44,15 @@ class TypingEngine:
         should_stop: Optional[Callable[[], bool]] = None,
         is_paused: Optional[Callable[[], bool]] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        emit_character: Optional[Callable[[str], None]] = None,
+        emit_key: Optional[Callable[[str], None]] = None,
     ):
         self.config = config
         self._should_stop = should_stop if should_stop is not None else (lambda: False)
         self._is_paused = is_paused if is_paused is not None else (lambda: False)
         self._on_status = on_status if on_status is not None else (lambda s: None)
+        self._emit_character = emit_character
+        self._emit_key = emit_key
 
     def _debug(self, message: str) -> None:
         logger.debug(message)
@@ -134,6 +138,26 @@ class TypingEngine:
                 return True
         return False
 
+    def _pg_write(self, text: str, *, interval: float = 0) -> None:
+        """Emit typed text; uses pyautogui unless emit_character is set (e.g. Smart Fill)."""
+        if self._emit_character:
+            if not text:
+                return
+            for i, ch in enumerate(text):
+                self._emit_character(ch)
+                if interval > 0 and i < len(text) - 1:
+                    time.sleep(interval)
+            return
+        pyautogui.PAUSE = 0
+        pyautogui.write(text, interval=interval)
+
+    def _pg_press(self, key: str) -> None:
+        """Emit a key press; uses pyautogui unless emit_key is set."""
+        if self._emit_key:
+            self._emit_key(key)
+        else:
+            pyautogui.press(key)
+
     def _get_char_delay(
         self, wpm: int, use_variation: bool, human_level: int
     ) -> float:
@@ -151,6 +175,7 @@ class TypingEngine:
         Type text with human-like patterns: delays, pauses, typos and corrections.
         Uses should_stop / is_paused / on_status callables if provided.
         """
+        print(f"[TypingEngine] type_text start: is_paused={self._is_paused()}, should_stop={self._should_stop()}", flush=True)
         cfg = self.config
         wpm = cfg.wpm
         countdown = cfg.countdown_seconds
@@ -246,27 +271,27 @@ class TypingEngine:
                     else:
                         wrong_char = random.choice("abcdefghijklmnopqrstuvwxyz")
 
-                    pyautogui.PAUSE = 0
                     self._debug(
-                        f"pyautogui.write typo wrong_char={wrong_char!r} line_idx={line_idx} char_idx={i}"
+                        f"type typo wrong_char={wrong_char!r} line_idx={line_idx} char_idx={i}"
                     )
-                    pyautogui.write(wrong_char, interval=0)
+                    print(f"[TypingEngine] about to write char={wrong_char!r}", flush=True)
+                    self._pg_write(wrong_char, interval=0)
                     time.sleep(random.uniform(0.05, 0.15))
                     time.sleep(random.uniform(0.3, 0.7))
-                    self._debug("pyautogui.press backspace for typo correction")
-                    pyautogui.press("backspace")
+                    self._debug("press backspace for typo correction")
+                    self._pg_press("backspace")
                     time.sleep(random.uniform(0.1, 0.2))
-                    pyautogui.PAUSE = 0
                     self._debug(
-                        f"pyautogui.write corrected_char={correct_char!r} line_idx={line_idx} char_idx={i}"
+                        f"type corrected_char={correct_char!r} line_idx={line_idx} char_idx={i}"
                     )
-                    pyautogui.write(correct_char, interval=0)
+                    print(f"[TypingEngine] about to write char={correct_char!r}", flush=True)
+                    self._pg_write(correct_char, interval=0)
                 else:
-                    pyautogui.PAUSE = 0
                     self._debug(
-                        f"pyautogui.write char={char!r} line_idx={line_idx} char_idx={i}"
+                        f"type char={char!r} line_idx={line_idx} char_idx={i}"
                     )
-                    pyautogui.write(char, interval=0)
+                    print(f"[TypingEngine] about to write char={char!r}", flush=True)
+                    self._pg_write(char, interval=0)
 
                 chars_typed += 1
                 progress = int((chars_typed / total_chars) * 100)
@@ -303,15 +328,15 @@ class TypingEngine:
                 next_line = lines[line_idx + 1]
                 next_is_list = self._is_list_marker(next_line)
                 if is_list_item and not next_is_list:
-                    self._debug("pyautogui.press enter (list spacing 1)")
-                    pyautogui.press("enter")
+                    self._debug("press enter (list spacing 1)")
+                    self._pg_press("enter")
                     time.sleep(0.15)
-                    self._debug("pyautogui.press enter (list spacing 2)")
-                    pyautogui.press("enter")
+                    self._debug("press enter (list spacing 2)")
+                    self._pg_press("enter")
                     time.sleep(0.2)
                 else:
-                    self._debug("pyautogui.press enter (line break)")
-                    pyautogui.press("enter")
+                    self._debug("press enter (line break)")
+                    self._pg_press("enter")
                     time.sleep(random.uniform(0.2, 0.4))
         self._debug("type_text completed")
 

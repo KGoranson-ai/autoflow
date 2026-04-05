@@ -13,9 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
-import urllib.request
-import urllib.error
+
+import requests
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -25,6 +24,7 @@ logger = logging.getLogger(__name__)
 AUTOFLOW_DIR = os.path.join(os.path.expanduser("~"), ".autoflow")
 LICENSE_FILE = os.path.join(AUTOFLOW_DIR, "license.key")
 LICENSE_CACHE = os.path.join(AUTOFLOW_DIR, "license_cache.json")
+# Production API on Railway (override with TYPESTRA_API_URL for staging / self-hosted).
 LICENSE_API = os.environ.get(
     "TYPESTRA_API_URL",
     "https://web-production-028cb.up.railway.app",
@@ -233,34 +233,37 @@ class LicenseManager:
 
     def _fetch_validation(self, key: str) -> LicenseInfo:
         """POST to /api/validate-license and parse the response."""
-        salt = os.environ.get("LICENSE_SALT", "")
-        url = f"{LICENSE_API}/api/validate-license"
-        payload = json.dumps({"license_key": key}).encode("utf-8")
-
+        url = f"{LICENSE_API.rstrip('/')}/api/validate-license"
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
 
         try:
-            req = urllib.request.Request(
+            response = requests.post(
                 url,
-                data=payload,
+                json={"license_key": key},
                 headers=headers,
-                method="POST",
+                timeout=10,
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
-            logger.warning("License validation HTTP %d: %s", e.code, body)
-            return LicenseInfo.invalid(f"Server error {e.code}")
-        except urllib.error.URLError as e:
-            logger.warning("License validation network error: %s", e.reason)
-            return LicenseInfo.invalid("Network error — check your connection")
-        except OSError as e:
-            logger.warning("License validation error: %s", e)
-            return LicenseInfo.invalid("Could not reach license server")
+            if not response.ok:
+                logger.warning(
+                    "License validation HTTP %s: %s",
+                    response.status_code,
+                    response.text[:500],
+                )
+                return LicenseInfo.invalid(f"Server error {response.status_code}")
+            data = response.json()
+        except requests.Timeout:
+            logger.warning("License validation timed out")
+            return LicenseInfo.invalid(
+                "Backend timeout - please check your internet connection"
+            )
+        except requests.ConnectionError:
+            logger.warning("License validation connection error")
+            return LicenseInfo.invalid(
+                "Cannot connect to license server - check internet"
+            )
         except json.JSONDecodeError as e:
             logger.warning("Invalid JSON from license server: %s", e)
             return LicenseInfo.invalid("Invalid server response")

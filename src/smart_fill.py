@@ -223,10 +223,22 @@ class SmartFillSession:
             _sf_debug(
                 f"PRE-LOOP STATE: is_paused={self.is_paused}, is_running={self.is_running}"
             )
+            print(
+                f"[SmartFill] PRE-LOOP STATE: is_paused={self.is_paused}, "
+                f"is_running={self.is_running}",
+                flush=True,
+            )
+            print(
+                f"[SmartFill] LOOP CHECK: current_row={self.current_row}, "
+                f"total={len(self.csv_data)}, is_running={self.is_running}",
+                flush=True,
+            )
 
             while self.current_row < len(self.csv_data) and self.is_running:
-                _sf_debug(
-                    f"Loop top: current_row={self.current_row}, is_running={self.is_running}, is_paused={self.is_paused}"
+                print(
+                    f"[SmartFill] Loop top: current_row={self.current_row}, "
+                    f"is_running={self.is_running}, is_paused={self.is_paused}",
+                    flush=True,
                 )
                 while self.is_paused and self.is_running:
                     time.sleep(0.1)
@@ -290,9 +302,10 @@ class SmartFillSession:
                 if row_cb and self.is_running:
                     row_cb(self.current_row)
 
-        except Exception as exc:
-            _sf_debug(f"FATAL execute_batch exception: {type(exc).__name__}: {exc}")
-            _sf_debug(traceback.format_exc())
+        except BaseException as e:
+            print(f"[SmartFill] FATAL BaseException in execute_batch: {e}", flush=True)
+            traceback.print_exc()
+            raise
         finally:
             self.preflight_active = False
             self.on_batch_complete(completion_cb=completion_cb)
@@ -358,49 +371,100 @@ class SmartFillSession:
         )
 
     def fill_current_row(self, typing_engine: Any) -> None:
-        _sf_debug(f"ENTER fill_current_row row_index={self.current_row}")
-        _sf_debug(
-            f"fill_current_row enter: row_index={self.current_row}, "
-            f"mapped_fields={len(self.field_mappings)}"
+        print(
+            f"[smart_fill] fill_current_row FIRST LINE row_index={self.current_row}",
+            flush=True,
         )
-        self._activate_chrome_before_field()
-        for position, field_config in enumerate(self.field_mappings, start=1):
-            _sf_debug(f"Field position={position} config={field_config}")
-            if not field_config:
-                _sf_debug(f"Field position={position} skipped (no mapping)")
-                continue
-            if field_config.get("type", "text") != "text":
-                _sf_debug(
-                    f"Field position={position} skipped (type={field_config.get('type')})"
-                )
-                continue
-
-            value = self.get_value_for_field(position)
-            if value is None:
-                _sf_debug(
-                    f"Field position={position} value=None -> press_tab()"
-                )
-                typing_engine.press_tab()
-                continue
-
-            preview = value if len(value) <= 80 else value[:77] + "..."
-            _sf_debug(
-                f"Field position={position} typing value len={len(value)} preview={preview!r}"
+        try:
+            print(f"ENTER fill_current_row row_index={self.current_row}", flush=True)
+            print(
+                f"fill_current_row enter: row_index={self.current_row}, "
+                f"mapped_fields={len(self.field_mappings)}",
+                flush=True,
             )
-            typing_engine.type_text(value)
-            time.sleep(random.uniform(0.1, 0.3))
+            self._activate_chrome_before_field()
+            for position, field_config in enumerate(self.field_mappings, start=1):
+                print(f"Field position={position} config={field_config}", flush=True)
+                if not field_config:
+                    print(f"Field position={position} skipped (no mapping)", flush=True)
+                    continue
+                if field_config.get("type", "text") != "text":
+                    print(
+                        f"Field position={position} skipped (type={field_config.get('type')})",
+                        flush=True,
+                    )
+                    continue
 
-            if self.auto_advance.navigation == "enter":
-                _sf_debug(
-                    f"Field position={position} navigation=enter -> press_enter()"
+                value = self.get_value_for_field(position)
+                if value is None:
+                    print(
+                        f"Field position={position} value=None -> press_tab()",
+                        flush=True,
+                    )
+                    try:
+                        typing_engine.press_tab()
+                    except BaseException:
+                        print(
+                            f"[smart_fill] exception in press_tab field position={position}",
+                            flush=True,
+                        )
+                        raise
+                    continue
+
+                preview = value if len(value) <= 80 else value[:77] + "..."
+                print(
+                    f"Field position={position} typing value len={len(value)} preview={preview!r}",
+                    flush=True,
                 )
-                typing_engine.press_enter()
-            else:
-                _sf_debug(
-                    f"Field position={position} navigation=tab -> press_tab()"
+                print(
+                    f"[smart_fill] before type_text field position={position} "
+                    f"len={len(value)} preview={preview!r}",
+                    flush=True,
                 )
-                typing_engine.press_tab()
-        _sf_debug(f"fill_current_row exit: row_index={self.current_row}")
+                try:
+                    typing_engine.type_text(value)
+                except BaseException:
+                    print(
+                        f"[smart_fill] exception in type_text field position={position}",
+                        flush=True,
+                    )
+                    raise
+                time.sleep(random.uniform(0.1, 0.3))
+
+                if self.auto_advance.navigation == "enter":
+                    print(
+                        f"Field position={position} navigation=enter -> press_enter()",
+                        flush=True,
+                    )
+                    try:
+                        typing_engine.press_enter()
+                    except BaseException:
+                        print(
+                            f"[smart_fill] exception in press_enter field position={position}",
+                            flush=True,
+                        )
+                        raise
+                else:
+                    print(
+                        f"Field position={position} navigation=tab -> press_tab()",
+                        flush=True,
+                    )
+                    try:
+                        typing_engine.press_tab()
+                    except BaseException:
+                        print(
+                            f"[smart_fill] exception in press_tab field position={position}",
+                            flush=True,
+                        )
+                        raise
+            print(f"fill_current_row exit: row_index={self.current_row}", flush=True)
+        except BaseException:
+            print(
+                f"[smart_fill] fill_current_row outer BaseException row_index={self.current_row}",
+                flush=True,
+            )
+            print(traceback.format_exc(), flush=True)
+            raise
 
     def auto_advance_to_next_row(
         self, typing_engine: Any, *, status_cb: Optional[Callable[[str], None]] = None
