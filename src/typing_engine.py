@@ -175,7 +175,6 @@ class TypingEngine:
         Type text with human-like patterns: delays, pauses, typos and corrections.
         Uses should_stop / is_paused / on_status callables if provided.
         """
-        print(f"[TypingEngine] type_text start: is_paused={self._is_paused()}, should_stop={self._should_stop()}", flush=True)
         cfg = self.config
         wpm = cfg.wpm
         countdown = cfg.countdown_seconds
@@ -274,7 +273,6 @@ class TypingEngine:
                     self._debug(
                         f"type typo wrong_char={wrong_char!r} line_idx={line_idx} char_idx={i}"
                     )
-                    print(f"[TypingEngine] about to write char={wrong_char!r}", flush=True)
                     self._pg_write(wrong_char, interval=0)
                     time.sleep(random.uniform(0.05, 0.15))
                     time.sleep(random.uniform(0.3, 0.7))
@@ -284,13 +282,11 @@ class TypingEngine:
                     self._debug(
                         f"type corrected_char={correct_char!r} line_idx={line_idx} char_idx={i}"
                     )
-                    print(f"[TypingEngine] about to write char={correct_char!r}", flush=True)
                     self._pg_write(correct_char, interval=0)
                 else:
                     self._debug(
                         f"type char={char!r} line_idx={line_idx} char_idx={i}"
                     )
-                    print(f"[TypingEngine] about to write char={char!r}", flush=True)
                     self._pg_write(char, interval=0)
 
                 chars_typed += 1
