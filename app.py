@@ -365,12 +365,19 @@ def create_app() -> Flask:
         sig_header = request.headers.get("Stripe-Signature")
         webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
 
+        if not webhook_secret:
+            logger.error("STRIPE_WEBHOOK_SECRET is not set — cannot verify webhook")
+            return jsonify({"error": "Webhook not configured"}), 200
+
         try:
             stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
             event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+        except ValueError as e:
+            logger.warning(f"Stripe webhook payload error: {e}")
+            return jsonify({"error": "Invalid payload"}), 200
         except Exception as e:
-            logger.error(f"Webhook signature error: {e}")
-            return jsonify({"error": "Invalid signature"}), 400
+            logger.warning(f"Stripe webhook signature error: {e}")
+            return jsonify({"error": "Invalid signature"}), 200
 
         if event["type"] == "checkout.session.completed":
             session_data = event["data"]["object"]

@@ -167,7 +167,13 @@ def validate_license(
     except ValueError as e:
         logger.info("validate_license: invalid key input: %s", e)
         _log_validation(session, _PLACEHOLDER_KEY_HASH, False, ip_address=ip_address)
-        return {"valid": False, "tier": None, "expires": None, "is_trial": False}
+        return {
+            "valid": False,
+            "tier": None,
+            "is_trial": False,
+            "expires": None,
+            "error": "Invalid license key",
+        }
 
     # 1. Check paid subscriptions
     sub = session.execute(
@@ -178,10 +184,11 @@ def validate_license(
         if sub.status == "active":
             valid = True
             tier = sub.tier
-            if sub.current_period_end is not None:
+            if sub.is_trial and sub.trial_end is not None:
+                is_trial = True
+                expires = sub.trial_end.isoformat()
+            elif sub.current_period_end is not None:
                 expires = sub.current_period_end.isoformat()
-            else:
-                expires = None
         else:
             valid = False
             logger.debug("validate_license: subscription not active (status=%s)", sub.status)
@@ -203,16 +210,24 @@ def validate_license(
                 tier = trial.tier
                 expires = trial.trial_end.isoformat()
             else:
-                # Trial expired — treat as invalid
                 logger.debug("validate_license: trial expired (trial_end=%s)", trial.trial_end)
 
     _log_validation(session, key_hash, valid, ip_address=ip_address)
 
+    if not valid:
+        return {
+            "valid": False,
+            "tier": tier,
+            "is_trial": is_trial,
+            "expires": None,
+            "error": "Invalid license key",
+        }
     return {
         "valid": valid,
         "tier": tier,
-        "expires": expires,
         "is_trial": is_trial,
+        "expires": expires,
+        "error": None,
     }
 
 
