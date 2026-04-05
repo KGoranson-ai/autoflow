@@ -159,6 +159,7 @@ def validate_license(
     tier: Optional[str] = None
     expires: Optional[str] = None
     is_trial = False
+    valid = False
 
     try:
         if not license_key or not str(license_key).strip():
