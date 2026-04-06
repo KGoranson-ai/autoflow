@@ -237,7 +237,7 @@ class SmartFillTypingAdapter:
             punctuation_pauses=self.app.punctuation_var.get(),
             typos_enabled=self.app.typos_var.get(),
             mode="text",
-            countdown_seconds=3,
+            countdown_seconds=0,
         )
         self._debug(
             "Building TypingEngine with config: "

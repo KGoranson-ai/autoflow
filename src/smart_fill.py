@@ -399,6 +399,7 @@ class SmartFillSession:
                     f"Field position={position} navigation=tab -> press_tab()"
                 )
                 typing_engine.press_tab()
+                time.sleep(0.4)
         _sf_debug(f"fill_current_row exit: row_index={self.current_row}")
 
     def auto_advance_to_next_row(
