@@ -34,6 +34,13 @@ STRIPE_PRICE_MAP = {
     "team": os.environ.get("STRIPE_PRICE_TEAM"),
 }
 
+# Map frontend tier IDs to DB/PG enum values
+TIER_MAP = {
+    "solo": "basic",
+    "pro": "pro",
+    "team": "premium",
+}
+
 # Map frontend tier IDs to Stripe price IDs (annual)
 STRIPE_PRICE_MAP_ANNUAL = {
     "solo": os.environ.get("STRIPE_PRICE_SOLO_ANNUAL"),
@@ -232,7 +239,7 @@ def create_app() -> Flask:
 
                 trial_request = TrialRequest(
                     email=email,
-                    tier=tier,
+                    tier=TIER_MAP[tier],
                     license_key_hash=key_hash,
                     trial_end=trial_end,
                     converted=False,
@@ -251,7 +258,7 @@ def create_app() -> Flask:
                 trial_sub = Subscription(
                     user_id=user.id,
                     license_key_hash=key_hash,
-                    tier=tier,
+                    tier=TIER_MAP[tier],
                     stripe_customer_id=None,
                     stripe_subscription_id=None,
                     status="active",
@@ -422,7 +429,7 @@ def create_app() -> Flask:
                         result = create_subscription(
                             session=s,
                             email=email,
-                            tier=tier,
+                            tier=TIER_MAP.get(tier, tier),
                             stripe_customer_id=stripe_customer_id,
                             stripe_subscription_id=stripe_subscription_id,
                         )
