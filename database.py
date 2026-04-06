@@ -22,6 +22,8 @@ subscription_tier_enum = ENUM(
     "basic",
     "pro",
     "premium",
+    "solo",
+    "team",
     name="subscription_tier",
     create_type=True,
 )
