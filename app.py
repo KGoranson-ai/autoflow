@@ -42,7 +42,7 @@ STRIPE_PRICE_MAP_ANNUAL = {
 }
 
 # Trial duration in days
-TRIAL_DAYS = 7
+TRIAL_DAYS = 14
 
 
 def create_app() -> Flask:
@@ -240,16 +240,39 @@ def create_app() -> Flask:
                 s.add(trial_request)
                 s.commit()
 
+                # Also create a subscriptions row so validate-license can find it
+                from database import Subscription
+                from database import User
+                user = s.execute(select(User).where(User.email == email)).scalar_one_or_none()
+                if user is None:
+                    user = User(email=email)
+                    s.add(user)
+                    s.flush()
+                trial_sub = Subscription(
+                    user_id=user.id,
+                    license_key_hash=key_hash,
+                    tier=tier,
+                    stripe_customer_id=None,
+                    stripe_subscription_id=None,
+                    status="active",
+                    is_trial=True,
+                    trial_end=trial_end,
+                    converted_from_trial=False,
+                    current_period_end=trial_end,
+                )
+                s.add(trial_sub)
+                s.commit()
+
                 # Email the trial license key
                 resend.api_key = os.environ.get("RESEND_API_KEY")
                 resend.Emails.send({
                     "from": "Typestra <noreply@typestra.com>",
                     "to": [email],
-                    "subject": "Your Typestra Free Trial — 7 Days Free",
+                    "subject": "Your Typestra Free Trial — 14 Days Free",
                     "html": f"""
                     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
                         <h2>Start your Typestra trial 🎉</h2>
-                        <p>Your 7-day free trial is active. Here's your license key:</p>
+                        <p>Your 14-day free trial is active. Here's your license key:</p>
                         <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 22px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px; margin: 20px 0;">
                             {trial_key}
                         </div>
@@ -268,9 +291,10 @@ def create_app() -> Flask:
 
                 logger.info(f"Trial started for {email}, tier={tier}, expires={trial_end.date()}")
                 return jsonify({
-                    "status": "trial_started",
+                    "success": True,
+                    "message": "Trial started",
                     "trial_end": trial_end.isoformat(),
-                    "tier": tier,
+                    "license_key": trial_key,
                 }), 200
 
             except Exception as e:
