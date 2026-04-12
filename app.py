@@ -13,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from flask import Flask, current_app, jsonify, request
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from sqlalchemy.orm import sessionmaker
 
 from database import Affiliate, Referral, TrialRequest, init_db, create_engine_from_env
@@ -57,12 +59,33 @@ def create_app() -> Flask:
     app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-change-me")
     app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MiB
 
-    cors_origins = _parse_cors_origins(
-        os.environ.get(
-            "CORS_ORIGINS",
-            "https://typestra.com,https://www.typestra.com,http://localhost:3000,http://127.0.0.1:3000",
-        )
+    # Initialize rate limiter (in-memory, no Redis)
+    limiter = Limiter(
+        app=app,
+        key_fn=get_remote_address,
+        default_limits=["200 per day"],
+        storage_uri="memory://",
     )
+
+    raw_cors_origins = os.environ.get(
+        "CORS_ORIGINS",
+        "https://typestra.com,https://www.typestra.com,http://localhost:3000,http://127.0.0.1:3000",
+    )
+    cors_origins = _parse_cors_origins(raw_cors_origins)
+
+    # Security: reject wildcard CORS_ORIGINS when credentials are enabled
+    if "*" in cors_origins:
+        if cors_origins == ["*"]:
+            logger.warning(
+                "CORS_ORIGINS=* is set. This allows any origin to make credentialed requests, "
+                "which is unsafe. Set a specific list of allowed origins instead."
+            )
+        else:
+            logger.warning(
+                "CORS_ORIGINS contains '*' alongside other origins. "
+                "Wildcard with credentials is unsafe — consider removing '*'."
+            )
+
     CORS(
         app,
         resources={r"/api/*": {"origins": cors_origins}},
@@ -191,6 +214,7 @@ def create_app() -> Flask:
             return jsonify({"error": "Failed to create checkout session"}), 500
 
     @app.route("/api/start-trial", methods=["POST"])
+    @limiter.limit("5 per minute")
     def start_trial():
         """Start a 7-day free trial. Creates a license key valid for 7 days and emails it."""
         try:
@@ -398,7 +422,7 @@ def create_app() -> Flask:
 
         if not webhook_secret:
             logger.error("STRIPE_WEBHOOK_SECRET is not set — cannot verify webhook")
-            return jsonify({"error": "Webhook not configured"}), 200
+            return jsonify({"error": "Webhook not configured"}), 500
 
         try:
             stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")

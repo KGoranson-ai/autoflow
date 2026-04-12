@@ -10,6 +10,7 @@ pandas>=2.0.0
 # Backend API (Flask / Railway)
 Flask==3.0.0
 flask-cors==4.0.0
+flask-limiter>=3.5.0
 # PostgreSQL (psycopg2; SQLAlchemy postgresql+psycopg2://).
 psycopg2-binary>=2.9.9
 SQLAlchemy>=2.0.36,<3
