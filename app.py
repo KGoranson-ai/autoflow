@@ -62,7 +62,7 @@ def create_app() -> Flask:
     # Initialize rate limiter (in-memory, no Redis)
     limiter = Limiter(
         app=app,
-        key_fn=get_remote_address,
+        key_func=get_remote_address,
         default_limits=["200 per day"],
         storage_uri="memory://",
     )
