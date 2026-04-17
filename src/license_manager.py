@@ -177,7 +177,7 @@ class LicenseManager:
                     logger.info("Trial expired (local check), showing upgrade prompt")
                     expired_info = LicenseInfo(
                         valid=False,
-                        tier=info.trial_end,
+                        tier=info.tier,
                         expires=info.trial_end,
                         is_trial=True,
                         trial_end=info.trial_end,

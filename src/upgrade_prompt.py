@@ -255,14 +255,19 @@ class UpgradeDialog(tk.Toplevel):
         upgrade_btn.pack(side="right")
 
         # ── secondary link ────────────────────────────────────────────────────
-        ttk.Label(
+        # Binding is placed on the label widget only, not the whole window.
+        # The guard ensures a crash does not occur when on_enter_license is None
+        # (e.g. when the dialog is shown for trial_expired without a license flow).
+        already_label = ttk.Label(
             outer,
             text="Already subscribed? Enter a license key instead",
             font=("Arial", 9),
             foreground="#888",
             cursor="hand2",
-        ).pack(pady=(8, 0))
-        self.bind("<Button-1>", lambda e: self._on_enter_license())
+        )
+        already_label.pack(pady=(8, 0))
+        if self._on_enter_license is not None:
+            already_label.bind("<Button-1>", lambda e: self._on_enter_license())
 
 
 # ─────────────────────────────────────────────────────────────────────────────

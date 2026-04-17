@@ -1,10 +1,11 @@
 """
 TypingEngine - Pure typing automation engine (no GUI).
 All pause, burst, typo, and delay logic lives here.
-Uses pyautogui only for keystroke output.
+Uses pyautogui for plain keystrokes; clipboard paste for shifted/special characters.
 """
 
 import pyautogui
+import pyperclip
 import logging
 import time
 import random
@@ -12,6 +13,15 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from typing import List, Callable, Optional
+
+# Characters pyautogui.write() can handle natively without a Shift modifier.
+# Everything outside this set is routed through clipboard paste to avoid
+# Shift-timing races that cause random capitalization and dropped symbols.
+_PYAUTOGUI_SAFE = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+    " \t"
+)
 
 
 logger = logging.getLogger(__name__)
@@ -139,7 +149,15 @@ class TypingEngine:
         return False
 
     def _pg_write(self, text: str, *, interval: float = 0) -> None:
-        """Emit typed text; uses pyautogui unless emit_character is set (e.g. Smart Fill)."""
+        """Emit typed text; uses pyautogui unless emit_character is set (e.g. Smart Fill).
+
+        Routing logic:
+        - emit_character callback: delegate entirely (Smart Fill / custom backend).
+        - Plain unshifted ASCII (a-z, 0-9, space, tab): pyautogui.write() — fast path.
+        - Everything else (uppercase, symbols, punctuation): clipboard paste via Cmd+V.
+          This avoids pyautogui's Shift-key timing races that produce random lowercase
+          letters and dropped/wrong special characters.
+        """
         if self._emit_character:
             if not text:
                 return
@@ -148,8 +166,46 @@ class TypingEngine:
                 if interval > 0 and i < len(text) - 1:
                     time.sleep(interval)
             return
+
+        if not text:
+            return
+
         pyautogui.PAUSE = 0
-        pyautogui.write(text, interval=interval)
+
+        # Batch consecutive safe characters together for efficiency, then
+        # paste any character that would require a modifier key.
+        safe_buf = []
+        for ch in text:
+            if ch in _PYAUTOGUI_SAFE:
+                safe_buf.append(ch)
+            else:
+                # Flush safe buffer first
+                if safe_buf:
+                    pyautogui.write("".join(safe_buf), interval=interval)
+                    safe_buf = []
+                # Paste the unsafe character via clipboard
+                self._clipboard_type(ch)
+                if interval > 0:
+                    time.sleep(interval)
+        if safe_buf:
+            pyautogui.write("".join(safe_buf), interval=interval)
+
+    def _clipboard_type(self, ch: str) -> None:
+        """Type a single character by saving the clipboard, pasting the char, then restoring."""
+        try:
+            saved = pyperclip.paste()
+        except Exception:
+            saved = ""
+        try:
+            pyperclip.copy(ch)
+            pyautogui.hotkey("command", "v")
+            # Brief settle so the paste event is processed before the next keystroke.
+            time.sleep(0.012)
+        finally:
+            try:
+                pyperclip.copy(saved)
+            except Exception:
+                pass
 
     def _pg_press(self, key: str) -> None:
         """Emit a key press; uses pyautogui unless emit_key is set."""
@@ -338,9 +394,11 @@ class TypingEngine:
 
     def type_spreadsheet(self, rows: List[List[str]]) -> None:
         """
-        Type spreadsheet data cell by cell: pyautogui.write only, then Tab or Enter.
-        No clipboard, hotkeys, Cmd keys, or arrow keys — avoids macOS dictation
-        and shortcut side effects from synthetic modifier combinations.
+        Type spreadsheet data cell by cell, then Tab or Enter.
+        Delegates all output through _pg_write / _pg_press so that custom emit
+        backends (e.g. Smart Fill) work correctly in spreadsheet mode.
+        No clipboard hotkeys or arrow keys in the default pyautogui path —
+        avoids macOS dictation and shortcut side effects.
         Uses should_stop / is_paused / on_status callables if provided.
         """
         pyautogui.PAUSE = 0
@@ -372,7 +430,7 @@ class TypingEngine:
 
                 cell_content = str(cell).strip()
                 if cell_content:
-                    pyautogui.write(cell_content, interval=0.05)
+                    self._pg_write(cell_content, interval=0.05)
 
                 cells_typed += 1
                 progress = int((cells_typed / total_cells) * 100)
@@ -386,7 +444,7 @@ class TypingEngine:
                 )
                 if not is_last_cell:
                     if col_idx < len(row) - 1:
-                        pyautogui.press("tab")
+                        self._pg_press("tab")
                     else:
-                        pyautogui.press("enter")
+                        self._pg_press("enter")
                     time.sleep(0.05)
