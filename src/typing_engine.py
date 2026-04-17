@@ -2,8 +2,10 @@
 TypingEngine - Pure typing automation engine (no GUI).
 All pause, burst, typo, and delay logic lives here.
 Uses pyautogui for plain keystrokes; clipboard paste for shifted/special characters.
+Supports macOS and Windows.
 """
 
+import platform
 import pyautogui
 import pyperclip
 import logging
@@ -13,6 +15,9 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from typing import List, Callable, Optional
+
+# Paste hotkey varies by platform
+_PASTE_HOTKEY = "ctrl" if platform.system() == "Windows" else "command"
 
 # Characters pyautogui.write() can handle natively without a Shift modifier.
 # Everything outside this set is routed through clipboard paste to avoid
@@ -154,9 +159,8 @@ class TypingEngine:
         Routing logic:
         - emit_character callback: delegate entirely (Smart Fill / custom backend).
         - Plain unshifted ASCII (a-z, 0-9, space, tab): pyautogui.write() — fast path.
-        - Everything else (uppercase, symbols, punctuation): clipboard paste via Cmd+V.
-          This avoids pyautogui's Shift-key timing races that produce random lowercase
-          letters and dropped/wrong special characters.
+        - Everything else (uppercase, symbols, punctuation): clipboard paste via platform
+          paste hotkey. Avoids pyautogui Shift-timing races on both Mac and Windows.
         """
         if self._emit_character:
             if not text:
@@ -179,11 +183,9 @@ class TypingEngine:
             if ch in _PYAUTOGUI_SAFE:
                 safe_buf.append(ch)
             else:
-                # Flush safe buffer first
                 if safe_buf:
                     pyautogui.write("".join(safe_buf), interval=interval)
                     safe_buf = []
-                # Paste the unsafe character via clipboard
                 self._clipboard_type(ch)
                 if interval > 0:
                     time.sleep(interval)
@@ -198,7 +200,7 @@ class TypingEngine:
             saved = ""
         try:
             pyperclip.copy(ch)
-            pyautogui.hotkey("command", "v")
+            pyautogui.hotkey(_PASTE_HOTKEY, "v")
             # Brief settle so the paste event is processed before the next keystroke.
             time.sleep(0.012)
         finally:

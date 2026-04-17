@@ -1,5 +1,6 @@
 """
 Error detection and logging for Smart Fill.
+Supports macOS (AppleScript) and Windows (pywin32 + BrowserContext delegation).
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ from browser_context import BrowserContext
 
 logger = logging.getLogger(__name__)
 
+_IS_MAC = platform.system() == "Darwin"
+_IS_WIN = platform.system() == "Windows"
+
 
 def _ed_debug(message: str) -> None:
     logger.debug(message)
@@ -27,7 +31,12 @@ def _ed_debug(message: str) -> None:
 class TimeoutDetector:
     """Detect likely form submission failures using OS-level signals."""
 
-    BROWSER_APPS = {"Safari", "Google Chrome", "Firefox", "Brave Browser"}
+    BROWSER_APPS = {
+        # macOS app names
+        "Safari", "Google Chrome", "Firefox", "Brave Browser",
+        # Windows process names (lowercase, matched after .lower())
+        "chrome.exe", "brave.exe", "firefox.exe", "msedge.exe",
+    }
 
     def __init__(self, typing_engine: Optional[Any] = None) -> None:
         self.typing_engine = typing_engine
@@ -99,43 +108,13 @@ class TimeoutDetector:
         return self.get_frontmost_app_name() in self.BROWSER_APPS
 
     def get_frontmost_app_name(self) -> str:
-        if platform.system() != "Darwin":
-            return ""
-        script = (
-            'tell application "System Events" '
-            'to get name of first application process whose frontmost is true'
-        )
-        _ed_debug("Running AppleScript for frontmost app name")
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, check=False
-        )
-        _ed_debug(
-            "Frontmost app AppleScript result: "
-            f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
-            f"stderr={result.stderr.strip()!r}"
-        )
-        return result.stdout.strip()
+        """Delegate to BrowserContext for cross-platform frontmost app detection."""
+        return BrowserContext().get_frontmost_app()
 
     def get_browser_url(self) -> str:
-        app = self.get_frontmost_app_name()
-        if app == "Safari":
-            script = 'tell application "Safari" to get URL of front document'
-        elif app in {"Google Chrome", "Brave Browser"}:
-            script = f'tell application "{app}" to get URL of active tab of front window'
-        elif app == "Firefox":
-            return ""
-        else:
-            return ""
-
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, check=False
-        )
-        _ed_debug(
-            f"URL AppleScript result for app={app!r}: "
-            f"returncode={result.returncode}, stdout={result.stdout.strip()!r}, "
-            f"stderr={result.stderr.strip()!r}"
-        )
-        return result.stdout.strip()
+        """Delegate to BrowserContext for cross-platform URL detection."""
+        url = BrowserContext().get_browser_url()
+        return url if url is not None else ""
 
 
 class CheckpointManager:
@@ -152,9 +131,22 @@ class CheckpointManager:
         return row_num > 0 and row_num % self.every_n_rows == 0
 
     def show_checkpoint_notification(self, row_num: int) -> None:
+        """Show a desktop notification. Uses plyer for cross-platform support."""
         text = f"Checkpoint: Verify row {row_num} submitted correctly"
-        script = f'display notification "{text}" with title "Typestra"'
-        subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+        try:
+            from plyer import notification
+            notification.notify(
+                title="Typestra",
+                message=text,
+                app_name="Typestra",
+                timeout=5,
+            )
+        except Exception as exc:
+            # Fallback: macOS osascript if plyer is unavailable
+            logger.debug("plyer notification failed (%s), trying osascript fallback", exc)
+            if _IS_MAC:
+                script = f'display notification "{text}" with title "Typestra"'
+                subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
 
 
 class ErrorLogger:
