@@ -14,7 +14,7 @@ from autoflow_engine import TypingConfig, TypingEngine
 def main() -> None:
     """Entry point for the autoflow console script. Runs CLI typing or launches GUI."""
     parser = argparse.ArgumentParser(
-        description="AutoFlow - Human-like typing automation"
+        description="Typestra - Human-like typing automation"
     )
     parser.add_argument(
         "--text",

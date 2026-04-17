@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-py2app build for AutoFlow (macOS .app).
+py2app build for Typestra (macOS .app).
 
 Lives in packaging_py2app/ so `python setup.py py2app` runs without a local
 pyproject.toml — py2app aborts if the distribution has install_requires, and
@@ -21,7 +21,7 @@ TESS_STAGING = os.path.join(REPO, "build", "tesseract_bundle")
 ICON_ICNS = os.path.join(REPO, "resources", "AutoFlow.icns")
 APP_SCRIPT = os.path.join(REPO, "src", "autoflow.py")
 
-APP_NAME = "AutoFlow"
+APP_NAME = "Typestra"
 BUNDLE_ID = "com.goransondigital.autoflow"
 VERSION = "3.0.0"
 
@@ -56,7 +56,7 @@ def _py2app_options() -> dict:
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "LSMinimumSystemVersion": "11.0",
-            "NSHumanReadableCopyright": "Copyright © AutoFlow",
+            "NSHumanReadableCopyright": "Copyright © Typestra",
             "NSHighResolutionCapable": True,
         },
         "semi_standalone": False,
@@ -119,7 +119,7 @@ def _py2app_options() -> dict:
 setup(
     name=APP_NAME,
     version=VERSION,
-    description="AutoFlow typing and spreadsheet automation",
+    description="Typestra typing and spreadsheet automation",
     app=[APP_SCRIPT],
     options={"py2app": _py2app_options()},
 )

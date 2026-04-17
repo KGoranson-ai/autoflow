@@ -1,5 +1,5 @@
 """
-AutoFlow v3.0 - Typing & Spreadsheet Automation
+Typestra v3.0 - Typing & Spreadsheet Automation
 import webbrowser
 Professional workflow automation with human-like typing patterns
 Now with spreadsheet support for Excel and Google Sheets
@@ -41,143 +41,14 @@ from sleep_wake_detector import SleepWakeDetector
 from resume_prompt import ResumePrompt
 from license_manager import AUTOFLOW_DIR, LicenseManager
 from upgrade_prompt import UpgradeDialog, TrialCountdownBanner
+from ocr_capture import OCRCapture
+from auto_calculations import preprocess_rows
 
 logger = logging.getLogger(__name__)
 
 # Persisted preferences (~/.autoflow/, same root as license key cache)
 SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "settings.json")
 SMART_FILL_SETTINGS_PATH = os.path.join(AUTOFLOW_DIR, "smart_fill_settings.json")
-
-
-class OCREngine:
-    """Pro feature: Extract text from images using Tesseract OCR."""
-
-    @staticmethod
-    def get_supported_formats():
-        """Return list of supported file extensions for OCR."""
-        return [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".pdf"]
-
-    @staticmethod
-    def _cleanup_text(text: str) -> str:
-        """Remove extra spaces and normalize unicode in extracted text."""
-        if not text or not text.strip():
-            return ""
-        # Normalize line endings
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        # Collapse multiple spaces to one (but preserve newlines)
-        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
-        # Collapse multiple blank lines to one
-        text = "\n".join(lines)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
-    @staticmethod
-    def extract_text(image_path: str) -> str:
-        """
-        Extract text from image using Tesseract.
-        Supports image formats only; PDF returns a friendly error.
-        """
-        if not OCR_AVAILABLE:
-            raise RuntimeError("OCR dependencies not installed. Install: pip install pytesseract Pillow")
-        path_lower = image_path.lower()
-        if path_lower.endswith(".pdf"):
-            raise ValueError("PDF support coming soon. Please use an image file (.jpg, .png, .gif, .bmp).")
-        if not os.path.isfile(image_path):
-            raise FileNotFoundError(f"File not found: {image_path}")
-        img = Image.open(image_path)
-        # Handle RGBA/P mode for compatibility
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-        raw = pytesseract.image_to_string(img)
-        return OCREngine._cleanup_text(raw)
-
-
-class SpreadsheetCalculator:
-    """Add totals row with SUM formulas for numeric columns."""
-
-    @staticmethod
-    def col_index_to_letter(index: int) -> str:
-        """Convert 0, 1, 2, ... to A, B, C, ... (Excel column letters)."""
-        result = ""
-        while index >= 0:
-            result = chr(index % 26 + ord("A")) + result
-            index = index // 26 - 1
-        return result
-
-    @staticmethod
-    def _is_numeric(value: str) -> bool:
-        """Return True if the cell value looks numeric."""
-        s = value.strip()
-        if not s:
-            return False
-        try:
-            float(s.replace(",", ""))
-            return True
-        except ValueError:
-            return False
-
-    @staticmethod
-    def detect_numeric_columns(csv_text: str) -> List[Tuple[int, str]]:
-        """
-        Analyze CSV and return list of (column_index, header_name) for columns
-        that contain only numeric values (excluding header row).
-        """
-        try:
-            reader = csv.reader(io.StringIO(csv_text))
-            rows = list(reader)
-        except Exception:
-            return []
-        if len(rows) < 2:
-            return []
-        headers = rows[0]
-        data_rows = rows[1:]
-        result = []
-        for col_idx in range(len(headers)):
-            header = (headers[col_idx] if col_idx < len(headers) else "").strip() or f"Col{col_idx + 1}"
-            values = []
-            for row in data_rows:
-                if col_idx < len(row):
-                    values.append(row[col_idx].strip())
-            if not values:
-                continue
-            # Column is numeric if all non-empty values are numeric
-            non_empty = [v for v in values if v]
-            if not non_empty:
-                continue
-            if all(SpreadsheetCalculator._is_numeric(v) for v in non_empty):
-                result.append((col_idx, header))
-        return result
-
-    @staticmethod
-    def add_totals_row(csv_text: str, numeric_columns: List[Tuple[int, str]]) -> str:
-        """
-        Append a totals row: "Total" in first column, =SUM(ColN2:ColNlast) in numeric columns.
-        numeric_columns is list of (col_index, header_name) from detect_numeric_columns.
-        """
-        if not numeric_columns:
-            return csv_text
-        reader = csv.reader(io.StringIO(csv_text))
-        rows = list(reader)
-        if len(rows) < 2:
-            return csv_text
-        num_data_rows = len(rows) - 1  # exclude header
-        num_cols = max(len(r) for r in rows)
-        totals_row = [""] * num_cols
-        totals_row[0] = "Total"
-        for col_idx, _ in numeric_columns:
-            if col_idx >= num_cols:
-                continue
-            col_letter = SpreadsheetCalculator.col_index_to_letter(col_idx)
-            # Data is in rows 2..N (1-based); in 0-based, rows[1] to rows[-1]
-            start_cell = f"{col_letter}2"
-            end_cell = f"{col_letter}{num_data_rows + 1}"
-            totals_row[col_idx] = f"=SUM({start_cell}:{end_cell})"
-        output = io.StringIO()
-        writer = csv.writer(output, lineterminator="\n")
-        for row in rows:
-            writer.writerow(row)
-        writer.writerow(totals_row)
-        return output.getvalue().strip()
 
 
 def _attach_tooltip(widget, text: str):
@@ -222,7 +93,7 @@ def _attach_tooltip(widget, text: str):
 class SmartFillTypingAdapter:
     """Small adapter to reuse TypingEngine settings for Smart Fill field typing."""
 
-    def __init__(self, autoflow_app: "AutoFlow"):
+    def __init__(self, autoflow_app: "Typestra"):
         self.app = autoflow_app
 
     def _debug(self, message: str) -> None:
@@ -280,7 +151,7 @@ class SmartFillTypingAdapter:
             return "unknown"
 
 
-class AutoFlow:
+class Typestra:
     def __init__(self, root):
         self.root = root
         self._is_mac = platform.system() == "Darwin"
@@ -334,11 +205,11 @@ class AutoFlow:
             self.setup_hotkey_listener()
         else:
             print(
-                "[AutoFlow] Global pynput listener disabled (using Tk key bindings only).",
+                "[Typestra] Global pynput listener disabled (using Tk key bindings only).",
                 flush=True,
             )
         
-        # Auto-pause when window gains focus (user clicked AutoFlow window)
+        # Auto-pause when window gains focus (user clicked Typestra window)
         self.root.bind('<FocusIn>', self.on_window_focus)
 
         self._loading_settings = False
@@ -574,66 +445,78 @@ class AutoFlow:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
 
-        autoflow_tab = ttk.Frame(self.notebook)
-        self.notebook.add(autoflow_tab, text="AutoFlow")
+        typestra_tab = ttk.Frame(self.notebook)
+        self.notebook.add(typestra_tab, text="Typestra")
 
         smart_fill_tab = ttk.Frame(self.notebook)
         self.notebook.add(smart_fill_tab, text="Smart Fill")
 
-        # Create a canvas with scrollbar for the AutoFlow tab
-        canvas = tk.Canvas(autoflow_tab)
-        scrollbar = ttk.Scrollbar(autoflow_tab, orient="vertical", command=canvas.yview)
+        main_frame = self._build_content_area(typestra_tab)
+
+        self._build_header(main_frame)
+        self._build_mode_selector(main_frame)
+        self._build_input_area(main_frame)
+        self._build_settings_panel(main_frame)
+        self._build_button_bar(main_frame)
+        self._build_status_area(main_frame)
+        self._build_instructions(main_frame)
+
+        self.create_smart_fill_tab(smart_fill_tab)
+
+    def _build_content_area(self, parent):
+        """Create the scrollable canvas container and return the inner main_frame."""
+        canvas = tk.Canvas(parent)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
-        
+
         scrollable_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-        
+
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Pack canvas and scrollbar
+
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        
-        # Enable mousewheel scrolling
+
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
-        # Main container with padding (now inside scrollable frame)
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+
         main_frame = ttk.Frame(scrollable_frame, padding="20")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Configure grid weights
-        autoflow_tab.columnconfigure(0, weight=1)
-        autoflow_tab.rowconfigure(0, weight=1)
+
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(2, weight=1)
-        
-        # Title
+        return main_frame
+
+    def _build_header(self, main_frame):
+        """Title and subtitle labels at the top of the main pane."""
         title_label = ttk.Label(
-            main_frame, 
-            text="⚡ AutoFlow v3.0",
+            main_frame,
+            text="⚡ Typestra",
             font=("Arial", 18, "bold")
         )
         title_label.grid(row=0, column=0, pady=(0, 5), sticky=tk.W)
-        
+
         subtitle_label = ttk.Label(
             main_frame,
-            text="Professional Workflow Automation | Text & Spreadsheet Support",
+            text="Human-like typing automation for VAs, data entry & customer service",
             font=("Arial", 9)
         )
         subtitle_label.grid(row=1, column=0, pady=(0, 15), sticky=tk.W)
-        
-        # Mode selection
+
+    def _build_mode_selector(self, main_frame):
+        """Text vs. Spreadsheet mode radio buttons."""
         mode_frame = ttk.LabelFrame(main_frame, text="Mode Selection", padding="10")
         mode_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
         mode_frame.columnconfigure(0, weight=1)
-        
+
         self.mode_var = tk.StringVar(value="text")
-        
+
         text_radio = ttk.Radiobutton(
             mode_frame,
             text="📝 Text Mode (Documents, emails, content)",
@@ -642,7 +525,7 @@ class AutoFlow:
             command=self._on_mode_changed
         )
         text_radio.grid(row=0, column=0, sticky=tk.W, pady=5, padx=5)
-        
+
         sheet_radio = ttk.Radiobutton(
             mode_frame,
             text="📊 Spreadsheet Mode (Excel, Google Sheets, CSV)",
@@ -651,13 +534,14 @@ class AutoFlow:
             command=self._on_mode_changed
         )
         sheet_radio.grid(row=1, column=0, sticky=tk.W, pady=5, padx=5)
-        
-        # Text input area
+
+    def _build_input_area(self, main_frame):
+        """Scrollable text input, stats/clear/extract row, CSV import button."""
         self.text_frame = ttk.LabelFrame(main_frame, text="Your Content", padding="10")
         self.text_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 15))
         self.text_frame.columnconfigure(0, weight=1)
         self.text_frame.rowconfigure(0, weight=1)
-        
+
         self.text_input = scrolledtext.ScrolledText(
             self.text_frame,
             wrap=tk.WORD,
@@ -667,15 +551,13 @@ class AutoFlow:
         )
         self.text_input.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         self.text_input.bind('<KeyRelease>', self.update_stats)
-        
-        # Stats/help text
+
         self.stats_frame = ttk.Frame(self.text_frame)
         self.stats_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
-        
+
         self.stats_label = ttk.Label(self.stats_frame, text="0 words, 0 characters")
         self.stats_label.pack(side=tk.LEFT)
-        
-        # Clear All button
+
         self.clear_text_btn = ttk.Button(
             self.stats_frame,
             text="Clear All",
@@ -685,118 +567,85 @@ class AutoFlow:
         _clear_tip = f"{'⌘' if self._is_mac else 'Ctrl+'}K: Clear all text"
         _attach_tooltip(self.clear_text_btn, _clear_tip)
 
-        # Extract from Image (Pro) - only in text mode
         self.extract_image_btn = ttk.Button(
             self.stats_frame,
             text="📷 Extract from Image",
             command=self.extract_from_image
         )
         self.extract_image_btn.pack(side=tk.LEFT, padx=(10, 0))
-        
+
         self.help_label = ttk.Label(
-            self.stats_frame, 
+            self.stats_frame,
             text="",
             foreground="gray"
         )
         self.help_label.pack(side=tk.RIGHT)
-        
-        # File import button (for spreadsheet mode)
+
         self.import_button = ttk.Button(
             self.text_frame,
             text="📂 Import CSV File",
             command=self.import_csv
         )
-        # Don't grid it yet - only shown in spreadsheet mode
-        
-        # Settings frame
+
+    def _build_settings_panel(self, main_frame):
+        """WPM/countdown/humanization sliders, spreadsheet options, humanization checkboxes."""
         settings_frame = ttk.LabelFrame(main_frame, text="Settings", padding="10")
         settings_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
         settings_frame.columnconfigure(1, weight=1)
-        
-        # WPM setting
+
         ttk.Label(settings_frame, text="Base Typing Speed:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        
         wpm_frame = ttk.Frame(settings_frame)
         wpm_frame.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
-        
         self.wpm_var = tk.IntVar(value=50)
         self.wpm_scale = ttk.Scale(
-            wpm_frame,
-            from_=30,
-            to=80,
-            orient=tk.HORIZONTAL,
-            variable=self.wpm_var,
-            command=self.update_wpm_label
+            wpm_frame, from_=30, to=80, orient=tk.HORIZONTAL,
+            variable=self.wpm_var, command=self.update_wpm_label
         )
         self.wpm_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.wpm_scale.bind("<ButtonRelease-1>", self._on_slider_released)
-        
         self.wpm_label = ttk.Label(wpm_frame, text="50 WPM", width=10)
         self.wpm_label.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Countdown setting
+
         ttk.Label(settings_frame, text="Countdown:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        
         countdown_frame = ttk.Frame(settings_frame)
         countdown_frame.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
-        
         self.countdown_var = tk.IntVar(value=5)
         self.countdown_scale = ttk.Scale(
-            countdown_frame,
-            from_=3,
-            to=10,
-            orient=tk.HORIZONTAL,
-            variable=self.countdown_var,
-            command=self.update_countdown_label
+            countdown_frame, from_=3, to=10, orient=tk.HORIZONTAL,
+            variable=self.countdown_var, command=self.update_countdown_label
         )
         self.countdown_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.countdown_scale.bind("<ButtonRelease-1>", self._on_slider_released)
-        
         self.countdown_label = ttk.Label(countdown_frame, text="5 seconds", width=10)
         self.countdown_label.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Humanization level
+
         ttk.Label(settings_frame, text="Humanization Level:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        
         human_frame = ttk.Frame(settings_frame)
         human_frame.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
-        
         self.human_var = tk.IntVar(value=2)
         self.human_scale = ttk.Scale(
-            human_frame,
-            from_=1,
-            to=3,
-            orient=tk.HORIZONTAL,
-            variable=self.human_var,
-            command=self.update_human_label
+            human_frame, from_=1, to=3, orient=tk.HORIZONTAL,
+            variable=self.human_var, command=self.update_human_label
         )
         self.human_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.human_scale.bind("<ButtonRelease-1>", self._on_slider_released)
-        
         self.human_label = ttk.Label(human_frame, text="Medium", width=10)
         self.human_label.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Spreadsheet-specific settings
+
         self.sheet_settings_frame = ttk.LabelFrame(settings_frame, text="Spreadsheet Options", padding="5")
-        # Don't grid it yet - only shown in spreadsheet mode
-        
         self.nav_var = tk.StringVar(value="tab")
         ttk.Radiobutton(
             self.sheet_settings_frame,
             text="Navigate with Tab (moves right, then down)",
-            variable=self.nav_var,
-            value="tab",
+            variable=self.nav_var, value="tab",
             command=self._on_settings_changed,
         ).pack(anchor=tk.W, pady=2)
-
         ttk.Radiobutton(
             self.sheet_settings_frame,
             text="Navigate with Enter (moves down, then right)",
-            variable=self.nav_var,
-            value="enter",
+            variable=self.nav_var, value="enter",
             command=self._on_settings_changed,
         ).pack(anchor=tk.W, pady=2)
-
         self.add_totals_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             self.sheet_settings_frame,
@@ -804,8 +653,7 @@ class AutoFlow:
             variable=self.add_totals_var,
             command=self._on_settings_changed,
         ).pack(anchor=tk.W, pady=2)
-        
-        # Options checkboxes
+
         self.variation_var = tk.BooleanVar(value=True)
         self.variation_check = ttk.Checkbutton(
             settings_frame,
@@ -814,7 +662,7 @@ class AutoFlow:
             command=self._on_settings_changed,
         )
         self.variation_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 2))
-        
+
         self.thinking_var = tk.BooleanVar(value=True)
         self.thinking_check = ttk.Checkbutton(
             settings_frame,
@@ -823,7 +671,7 @@ class AutoFlow:
             command=self._on_settings_changed,
         )
         self.thinking_check.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=2)
-        
+
         self.punctuation_var = tk.BooleanVar(value=True)
         self.punctuation_check = ttk.Checkbutton(
             settings_frame,
@@ -832,7 +680,7 @@ class AutoFlow:
             command=self._on_settings_changed,
         )
         self.punctuation_check.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=2)
-        
+
         self.typos_var = tk.BooleanVar(value=True)
         self.typos_check = ttk.Checkbutton(
             settings_frame,
@@ -842,60 +690,30 @@ class AutoFlow:
         )
         self.typos_check.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
 
-        # Smart Fill settings quick panel
-        self.sf_settings_frame = ttk.LabelFrame(settings_frame, text="Smart Fill Settings", padding="5")
-        self.sf_settings_frame.grid(row=8, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 2))
+        # Smart Fill settings vars live here so load_settings() can bind values
+        # without building widgets outside the Smart Fill tab.
         self.sf_global_auto_var = tk.BooleanVar(value=True)
         self.sf_global_delay_var = tk.IntVar(value=3)
         self.sf_global_checkpoint_var = tk.IntVar(value=5)
         self.sf_global_timeout_var = tk.IntVar(value=10)
         self.sf_global_demo_var = tk.BooleanVar(value=False)
 
-        ttk.Checkbutton(
-            self.sf_settings_frame,
-            text="Enable auto-advance to next row",
-            variable=self.sf_global_auto_var,
-            command=self._on_settings_changed,
-        ).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(self.sf_settings_frame, text="Delay").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(
-            self.sf_settings_frame, from_=1, to=30, width=5, textvariable=self.sf_global_delay_var,
-            command=self._on_settings_changed
-        ).grid(row=1, column=1, sticky="w", padx=5)
-        ttk.Label(self.sf_settings_frame, text="Checkpoint every N rows").grid(row=2, column=0, sticky="w")
-        ttk.Spinbox(
-            self.sf_settings_frame, from_=1, to=50, width=5, textvariable=self.sf_global_checkpoint_var,
-            command=self._on_settings_changed
-        ).grid(row=2, column=1, sticky="w", padx=5)
-        ttk.Label(self.sf_settings_frame, text="Timeout seconds").grid(row=3, column=0, sticky="w")
-        ttk.Spinbox(
-            self.sf_settings_frame, from_=3, to=60, width=5, textvariable=self.sf_global_timeout_var,
-            command=self._on_settings_changed
-        ).grid(row=3, column=1, sticky="w", padx=5)
-        ttk.Checkbutton(
-            self.sf_settings_frame,
-            text="Enable Demo Mode",
-            variable=self.sf_global_demo_var,
-            command=self._on_settings_changed,
-        ).grid(row=4, column=0, columnspan=3, sticky="w")
-        
-        # Button frame
+    def _build_button_bar(self, main_frame):
+        """Start / Pause / Stop / Clear action buttons."""
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
-        button_frame.columnconfigure(0, weight=1)
-        button_frame.columnconfigure(1, weight=1)
-        button_frame.columnconfigure(2, weight=1)
-        button_frame.columnconfigure(3, weight=1)
-        
+        for col in range(4):
+            button_frame.columnconfigure(col, weight=1)
+
         _start_tip = "⌘+Enter: Start typing" if self._is_mac else "Ctrl+Enter: Start typing"
         self.start_button = ttk.Button(
             button_frame,
-            text="▶ Start AutoFlow",
+            text="▶ Start Typestra",
             command=self.start_typing
         )
         self.start_button.grid(row=0, column=0, padx=(0, 5), sticky=(tk.W, tk.E))
         _attach_tooltip(self.start_button, _start_tip)
-        
+
         self.pause_button = ttk.Button(
             button_frame,
             text="⏸ Pause",
@@ -903,7 +721,7 @@ class AutoFlow:
             state=tk.DISABLED
         )
         self.pause_button.grid(row=0, column=1, padx=5, sticky=(tk.W, tk.E))
-        
+
         self.stop_button = ttk.Button(
             button_frame,
             text="⏹ Stop",
@@ -911,36 +729,38 @@ class AutoFlow:
             state=tk.DISABLED
         )
         self.stop_button.grid(row=0, column=2, padx=5, sticky=(tk.W, tk.E))
-        
+
         self.clear_button = ttk.Button(
             button_frame,
             text="🗑 Clear",
             command=self.clear_text
         )
         self.clear_button.grid(row=0, column=3, padx=(5, 0), sticky=(tk.W, tk.E))
-        
-        # Status area
+
+    def _build_status_area(self, main_frame):
+        """Status label (shown under the button row)."""
         status_frame = ttk.LabelFrame(main_frame, text="Status", padding="10")
         status_frame.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
         status_frame.columnconfigure(0, weight=1)
-        
+
         self.status_label = ttk.Label(
             status_frame,
             text="Ready. Select mode and paste your content.",
             font=("Arial", 10)
         )
         self.status_label.grid(row=0, column=0, sticky=tk.W)
-        
-        # Instructions
+
+    def _build_instructions(self, main_frame):
+        """Quick Start help text."""
         instructions_frame = ttk.LabelFrame(main_frame, text="Quick Start", padding="10")
         instructions_frame.grid(row=7, column=0, sticky=(tk.W, tk.E))
-        
+
         _sk = (
             "⌘V Paste · ⌘K Clear · ⌘⏎ Start · ⌘Q Quit"
             if self._is_mac
             else "Ctrl+V Paste · Ctrl+K Clear · Ctrl+Enter Start · Ctrl+Q Quit"
         )
-        self.instructions_text = f"""KEYBOARD: {_sk} (paste/clear/start shortcuts are off while AutoFlow is typing; quit always saves)
+        self.instructions_text = f"""KEYBOARD: {_sk} (paste/clear/start shortcuts are off while Typestra is typing; quit always saves)
 
 TEXT MODE: Paste your content (or use 📷 Extract from Image) → Click Start → Switch to target app
 SPREADSHEET MODE: Paste CSV data → Click Start → Click first cell (A1)
@@ -950,13 +770,13 @@ NOTE: Accented characters are automatically converted to plain text:
 • This ensures reliable typing across all apps
 
 PASTING TIPS:
-• Paste formatted text directly - AutoFlow handles bullets (•), apostrophes (')
+• Paste formatted text directly - Typestra handles bullets (•), apostrophes (')
 • Lists with numbers/letters work great (a., b., 1., 2.)
 
-PAUSE/RESUME: Press F8 anytime OR click AutoFlow window to auto-pause
+PAUSE/RESUME: Press F8 anytime OR click Typestra window to auto-pause
 
 EMERGENCY STOP: Move mouse to top-left corner"""
-        
+
         instructions_label = ttk.Label(
             instructions_frame,
             text=self.instructions_text,
@@ -965,14 +785,49 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         )
         instructions_label.grid(row=0, column=0, sticky=tk.W)
 
-        self.create_smart_fill_tab(smart_fill_tab)
-
     def create_smart_fill_tab(self, parent):
         self.smart_fill_frame = parent
+        self.load_smart_fill_settings()
+        self._build_smart_fill_settings_panel(parent)
         self.smart_fill_content = ttk.Frame(parent, padding=12)
         self.smart_fill_content.pack(fill="both", expand=True)
-        self.load_smart_fill_settings()
         self.show_import_screen()
+
+    def _build_smart_fill_settings_panel(self, parent):
+        """Smart Fill global settings panel — lives only in the Smart Fill tab."""
+        self.sf_settings_frame = ttk.LabelFrame(parent, text="Smart Fill Settings", padding="5")
+        self.sf_settings_frame.pack(fill="x", padx=12, pady=(12, 0))
+
+        ttk.Checkbutton(
+            self.sf_settings_frame,
+            text="Enable auto-advance to next row",
+            variable=self.sf_global_auto_var,
+            command=self._on_settings_changed,
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(self.sf_settings_frame, text="Delay").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(
+            self.sf_settings_frame, from_=1, to=30, width=5,
+            textvariable=self.sf_global_delay_var,
+            command=self._on_settings_changed,
+        ).grid(row=1, column=1, sticky="w", padx=5)
+        ttk.Label(self.sf_settings_frame, text="Checkpoint every N rows").grid(row=2, column=0, sticky="w")
+        ttk.Spinbox(
+            self.sf_settings_frame, from_=1, to=50, width=5,
+            textvariable=self.sf_global_checkpoint_var,
+            command=self._on_settings_changed,
+        ).grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Label(self.sf_settings_frame, text="Timeout seconds").grid(row=3, column=0, sticky="w")
+        ttk.Spinbox(
+            self.sf_settings_frame, from_=3, to=60, width=5,
+            textvariable=self.sf_global_timeout_var,
+            command=self._on_settings_changed,
+        ).grid(row=3, column=1, sticky="w", padx=5)
+        ttk.Checkbutton(
+            self.sf_settings_frame,
+            text="Enable Demo Mode",
+            variable=self.sf_global_demo_var,
+            command=self._on_settings_changed,
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
 
     def _clear_smart_fill_content(self):
         for widget in self.smart_fill_content.winfo_children():
@@ -2249,50 +2104,44 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.update_stats()
 
     def extract_from_image(self):
-        """Pro: Extract text from image via OCR and insert into text box."""
-        if not OCR_AVAILABLE:
-            messagebox.showerror(
-                "OCR Not Available",
-                "OCR dependencies are not installed.\n\nInstall with: pip install pytesseract Pillow\n\nYou also need Tesseract installed (e.g. brew install tesseract on macOS)."
-            )
-            return
-        exts = OCREngine.get_supported_formats()
-        # File dialog: image types only (no PDF in picker to avoid confusion, or include and handle in validation)
+        """Pro: Extract text from image/PDF via OCR and insert into text box."""
+        supported_exts = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".pdf"]
         filetypes = [
-            ("Image files", " ".join("*" + e for e in exts if e != ".pdf")),
+            ("Image & PDF files", " ".join("*" + e for e in supported_exts)),
             ("All files", "*.*"),
         ]
         path = filedialog.askopenfilename(
-            title="Select image to extract text from",
+            title="Select image or PDF to extract text from",
             filetypes=filetypes,
         )
         if not path:
             return
-        # Validate file exists
         if not os.path.isfile(path):
             messagebox.showerror("Error", "File not found.")
             return
-        # Validate extension
         ext = os.path.splitext(path)[1].lower()
-        if ext not in OCREngine.get_supported_formats():
-            messagebox.showerror("Error", f"Unsupported file type: {ext}\nSupported: {', '.join(OCREngine.get_supported_formats())}")
+        if ext not in supported_exts:
+            messagebox.showerror("Error", f"Unsupported file type: {ext}\nSupported: {', '.join(supported_exts)}")
             return
-        # Validate file size (10MB)
+        max_bytes = 10 * 1024 * 1024
         try:
             size = os.path.getsize(path)
         except OSError:
             messagebox.showerror("Error", "Could not read file size.")
             return
-        if size > OCR_MAX_FILE_BYTES:
-            messagebox.showerror("Error", f"File too large (max {OCR_MAX_FILE_BYTES // (1024*1024)}MB).")
+        if size > max_bytes:
+            messagebox.showerror("Error", f"File too large (max {max_bytes // (1024*1024)}MB).")
             return
         self.status_label.config(text="Extracting text...")
         self.extract_image_btn.config(state=tk.DISABLED)
         result_holder = []
 
+        license_info = getattr(self.license_manager, "get_license_info", lambda: None)() if hasattr(self, "license_manager") else None
+        ocr = OCRCapture(license_info=license_info)
+
         def do_ocr():
             try:
-                text = OCREngine.extract_text(path)
+                text = ocr.extract(path)
                 result_holder.append(("ok", text))
             except Exception as e:
                 result_holder.append(("err", str(e)))
@@ -2310,13 +2159,11 @@ EMERGENCY STOP: Move mouse to top-left corner"""
                 messagebox.showerror("OCR Error", value)
                 self.status_label.config(text="OCR failed.")
                 return
-            # Clear existing text, normalize, insert
             self.text_input.delete("1.0", tk.END)
-            normalized = TypingEngine.normalize_special_chars(value)
-            self.text_input.insert("1.0", normalized)
+            self.text_input.insert("1.0", value)
             self.update_stats()
-            count = len(normalized)
-            self.status_label.config(text=f"✓ Extracted {count} characters from image. Edit if needed, then Start.")
+            count = len(value)
+            self.status_label.config(text=f"✓ Extracted {count} characters. Edit if needed, then Start.")
         
     def start_typing(self):
         text = self.text_input.get("1.0", tk.END).strip()
@@ -2331,20 +2178,23 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.stop_button.config(state=tk.NORMAL)
         self.clear_button.config(state=tk.DISABLED)
         
-        # Spreadsheet mode: optionally add totals row with SUM formulas
+        # Spreadsheet mode: optionally auto-calculate totals/sums from trigger labels
         if self.mode_var.get() == "spreadsheet" and self.add_totals_var.get():
-            numeric_cols = SpreadsheetCalculator.detect_numeric_columns(text)
-            if numeric_cols:
-                names = ", ".join(name for _, name in numeric_cols)
-                msg = f"Found {len(numeric_cols)} numeric column(s): {names}.\n\nAdd SUM formulas in a totals row?"
-                if messagebox.askyesno("Add totals row?", msg):
-                    text = SpreadsheetCalculator.add_totals_row(text, numeric_cols)
-                    # Update text box so user sees the result
+            try:
+                reader = csv.reader(io.StringIO(text))
+                rows = list(reader)
+                processed = preprocess_rows(rows)
+                if processed != rows:
+                    output = io.StringIO()
+                    writer = csv.writer(output, lineterminator="\n")
+                    for row in processed:
+                        writer.writerow(row)
+                    text = output.getvalue().strip()
                     self.text_input.delete("1.0", tk.END)
                     self.text_input.insert("1.0", text)
                     self.update_stats()
-            else:
-                messagebox.showinfo("Add totals row", "No numeric columns found. Typing without totals row.")
+            except Exception as e:
+                logger.debug("auto-calculations preprocess failed: %s", e)
 
         # Start typing in a separate thread
         self.is_typing = True
@@ -2382,13 +2232,13 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             self.status_label.config(text="⏸ PAUSED - Click Resume or press F8, then click back to your document")
         
     def on_window_focus(self, event):
-        """Auto-pause when user clicks on AutoFlow window"""
+        """Auto-pause when user clicks on Typestra window"""
         if self.smart_fill_session.is_running:
             return
         if self.is_typing and not self.is_paused:
             self.toggle_pause()
             # Show helpful message
-            self.status_label.config(text="⏸ Auto-paused (you clicked AutoFlow). Click RESUME or press F8 to continue!")
+            self.status_label.config(text="⏸ Auto-paused (you clicked Typestra). Click RESUME or press F8 to continue!")
         if self.smart_fill_session.preflight_active:
             return
         if self.smart_fill_session.is_running and not self.smart_fill_session.is_paused:
@@ -2557,14 +2407,14 @@ EMERGENCY STOP: Move mouse to top-left corner"""
 def main():
     """Launch the GUI."""
     root = tk.Tk()
-    app = AutoFlow(root)
+    app = Typestra(root)
     root.mainloop()
 
 
 def run_cli_or_gui():
     """Parse argv: if --text given run CLI typing, else launch GUI."""
     parser = argparse.ArgumentParser(
-        description="AutoFlow - Human-like typing automation"
+        description="Typestra - Human-like typing automation"
     )
     parser.add_argument(
         "--text",
