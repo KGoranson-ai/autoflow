@@ -35,9 +35,11 @@ TIER_FEATURES: dict[str, list[str]] = {
     "solo":  ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile"],
     "pro":   ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile",
               "ocr", "auto_calculations", "multi_device"],
+    "pro_plus": ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile",
+                 "ocr", "auto_calculations", "multi_device", "multi_form"],
     "team":  ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile",
               "ocr", "auto_calculations", "multi_device",
-              "scheduled_scripts", "team_management", "dedicated_support"],
+              "multi_form", "scheduled_scripts", "team_management", "dedicated_support"],
 }
 
 # Which features are reserved for paid tiers (vs. trial)
@@ -57,6 +59,17 @@ class LicenseInfo:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def is_pro_plus(self) -> bool:
+        """Return True if the license tier is pro_plus or team."""
+        return self.tier in ("pro_plus", "team")
+
+    def is_multi_form_allowed(self) -> bool:
+        """
+        Return True if multi-form fill is available for this license.
+        Requires Pro+ or Team tier with a valid, non-expired license.
+        """
+        return self.valid and self.is_pro_plus() and "multi_form" in self.features
 
     @staticmethod
     def invalid(error: str = "No license") -> "LicenseInfo":
@@ -177,7 +190,7 @@ class LicenseManager:
                     logger.info("Trial expired (local check), showing upgrade prompt")
                     expired_info = LicenseInfo(
                         valid=False,
-                        tier=info.tier,
+                        tier=info.trial_end,
                         expires=info.trial_end,
                         is_trial=True,
                         trial_end=info.trial_end,
