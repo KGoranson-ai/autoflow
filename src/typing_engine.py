@@ -159,8 +159,8 @@ class TypingEngine:
         Routing logic:
         - emit_character callback: delegate entirely (Smart Fill / custom backend).
         - Plain unshifted ASCII (a-z, 0-9, space, tab): pyautogui.write() — fast path.
-        - Everything else (uppercase, symbols, punctuation): clipboard paste via platform
-          paste hotkey. Avoids pyautogui Shift-timing races on both Mac and Windows.
+        - Everything else (uppercase, symbols, punctuation): clipboard paste via
+          platform paste hotkey. Avoids Shift-timing races on both Mac and Windows.
         """
         if self._emit_character:
             if not text:
@@ -176,8 +176,6 @@ class TypingEngine:
 
         pyautogui.PAUSE = 0
 
-        # Batch consecutive safe characters together for efficiency, then
-        # paste any character that would require a modifier key.
         safe_buf = []
         for ch in text:
             if ch in _PYAUTOGUI_SAFE:
@@ -193,7 +191,7 @@ class TypingEngine:
             pyautogui.write("".join(safe_buf), interval=interval)
 
     def _clipboard_type(self, ch: str) -> None:
-        """Type a single character by saving the clipboard, pasting the char, then restoring."""
+        """Type a single character via clipboard paste with save/restore."""
         try:
             saved = pyperclip.paste()
         except Exception:
@@ -201,7 +199,6 @@ class TypingEngine:
         try:
             pyperclip.copy(ch)
             pyautogui.hotkey(_PASTE_HOTKEY, "v")
-            # Brief settle so the paste event is processed before the next keystroke.
             time.sleep(0.012)
         finally:
             try:
@@ -397,12 +394,17 @@ class TypingEngine:
     def type_spreadsheet(self, rows: List[List[str]]) -> None:
         """
         Type spreadsheet data cell by cell, then Tab or Enter.
-        Delegates all output through _pg_write / _pg_press so that custom emit
-        backends (e.g. Smart Fill) work correctly in spreadsheet mode.
-        No clipboard hotkeys or arrow keys in the default pyautogui path —
-        avoids macOS dictation and shortcut side effects.
-        Uses should_stop / is_paused / on_status callables if provided.
+        Delegates output through _pg_write / _pg_press for backend compatibility.
+        Runs auto_calculations.preprocess_rows() before typing to substitute
+        trigger labels (total, sum, avg, etc.) with computed values.
         """
+        # Auto-calculations: replace trigger labels with computed values
+        try:
+            from auto_calculations import preprocess_rows
+            rows = preprocess_rows(rows)
+        except ImportError:
+            pass  # auto_calculations not available — skip silently
+
         pyautogui.PAUSE = 0
         cfg = self.config
         countdown = cfg.countdown_seconds
