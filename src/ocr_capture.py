@@ -1,6 +1,8 @@
 """
 OCR Text Capture — Pro+ feature.
-Extracts text from images and PDFs using pytesseract and pdfplumber.
+Extracts text from images and PDFs using Docling (primary) with a
+pytesseract fallback if Docling is unavailable. Digital PDFs use
+pdfplumber for the fast embedded-text path.
 Output is normalized through TypingEngine.normalize_special_chars()
 so the result is always safe to type or save as a text block.
 """
@@ -34,25 +36,6 @@ def _require_pro_plus(license_info) -> None:
         )
 
 
-def _extract_text_from_image(path: str) -> str:
-    """Run pytesseract OCR on a single image file."""
-    try:
-        from PIL import Image
-        import pytesseract
-    except ImportError as e:
-        raise ImportError(
-            "pytesseract and Pillow are required for image OCR. "
-            "Install them with: pip install pytesseract Pillow"
-        ) from e
-
-    img = Image.open(path)
-    # Use LSTM engine (OEM 3) with automatic page segmentation (PSM 3)
-    custom_config = r"--oem 3 --psm 3"
-    text = pytesseract.image_to_string(img, config=custom_config)
-    logger.debug("OCR image result: %d chars from %r", len(text), path)
-    return text
-
-
 def _extract_text_from_pdf_embedded(path: str) -> Optional[str]:
     """
     Try to extract embedded (digital) text from a PDF using pdfplumber.
@@ -82,29 +65,64 @@ def _extract_text_from_pdf_embedded(path: str) -> Optional[str]:
     return combined
 
 
-def _extract_text_from_pdf_ocr(path: str) -> str:
+def _extract_with_docling(path: str) -> str:
     """
-    Fallback: render each PDF page as an image and OCR it.
-    Used when the PDF is scanned or image-only (no embedded text).
+    Extract text from a file using Docling.
+    Handles scanned PDFs, images, multi-column layouts, and tables.
+    Falls back to pytesseract if Docling is not installed.
     """
     try:
-        from pdf2image import convert_from_path
+        from docling.document_converter import DocumentConverter
+    except ImportError:
+        logger.warning(
+            "docling is not installed — falling back to pytesseract. "
+            "Install docling for better OCR accuracy: pip install docling"
+        )
+        return _tesseract_fallback(path)
+
+    try:
+        converter = DocumentConverter()
+        result = converter.convert(path)
+        text = result.document.export_to_markdown()
+        logger.debug("Docling extracted %d chars from %r", len(text), path)
+        return text
+    except Exception as exc:
+        logger.warning("Docling extraction failed for %r: %s — trying fallback", path, exc)
+        return _tesseract_fallback(path)
+
+
+def _tesseract_fallback(path: str) -> str:
+    """Last-resort fallback using pytesseract. Used only if Docling is unavailable."""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        from PIL import Image
         import pytesseract
     except ImportError as e:
         raise ImportError(
-            "pdf2image and pytesseract are required for scanned PDF OCR. "
-            "Install them with: pip install pdf2image pytesseract"
+            "Neither docling nor pytesseract+Pillow are available. "
+            "Install docling for best results: pip install docling"
         ) from e
 
-    images = convert_from_path(path, dpi=300)
-    pages_text = []
-    for i, img in enumerate(images):
-        custom_config = r"--oem 3 --psm 3"
-        text = pytesseract.image_to_string(img, config=custom_config)
-        pages_text.append(text.strip())
-        logger.debug("OCR PDF page %d: %d chars", i + 1, len(text))
-
-    return "\n\n".join(pages_text).strip()
+    if ext == ".pdf":
+        try:
+            from pdf2image import convert_from_path
+        except ImportError as e:
+            raise ImportError(
+                "pdf2image is required for scanned PDF fallback. "
+                "Install it with: pip install pdf2image"
+            ) from e
+        images = convert_from_path(path, dpi=300)
+        pages = []
+        for i, img in enumerate(images):
+            text = pytesseract.image_to_string(img, config=r"--oem 3 --psm 3")
+            pages.append(text.strip())
+            logger.debug("Tesseract fallback PDF page %d: %d chars", i + 1, len(text))
+        return "\n\n".join(pages).strip()
+    else:
+        img = Image.open(path)
+        text = pytesseract.image_to_string(img, config=r"--oem 3 --psm 3")
+        logger.debug("Tesseract fallback image: %d chars from %r", len(text), path)
+        return text
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +181,7 @@ class OCRCapture:
         if ext == ".pdf":
             raw = self._extract_pdf(path)
         elif ext in _IMAGE_EXTENSIONS:
-            raw = _extract_text_from_image(path)
+            raw = _extract_with_docling(path)
         else:
             raise ValueError(
                 f"Unsupported file type: {ext!r}. "
@@ -173,12 +191,12 @@ class OCRCapture:
         return self._normalize(raw)
 
     def _extract_pdf(self, path: str) -> str:
-        """Try embedded text first; fall back to page-image OCR."""
+        """Try embedded text first (fast); fall back to Docling for scanned/complex PDFs."""
         embedded = _extract_text_from_pdf_embedded(path)
         if embedded:
             return embedded
-        logger.info("No embedded text in %r — running OCR on rendered pages", path)
-        return _extract_text_from_pdf_ocr(path)
+        logger.info("No embedded text in %r — running Docling OCR", path)
+        return _extract_with_docling(path)
 
     @staticmethod
     def _normalize(text: str) -> str:
