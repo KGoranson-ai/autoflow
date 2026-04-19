@@ -4,8 +4,8 @@ pyperclip==1.8.2
 pynput==1.7.6
 Pillow>=11.0.0
 pdfplumber>=0.10.0
-docling>=2.0.0
-requests==2.31.0
+docling>=2.90.0,<3
+requests>=2.32.3,<3
 pandas>=2.0.0
 
 # Optional OCR fallback (only used if docling is unavailable):

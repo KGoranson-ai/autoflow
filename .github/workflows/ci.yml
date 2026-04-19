@@ -36,7 +36,7 @@ jobs:
             "SQLAlchemy>=2.0.36,<3" \
             "alembic>=1.13.0,<2" \
             python-dotenv==1.0.0 \
-            requests==2.31.0
+            "requests>=2.32.3,<3"
 
       - name: Compile source
         run: python -m compileall app.py database.py license.py src tests -q
