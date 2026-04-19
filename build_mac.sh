@@ -23,16 +23,31 @@ if [[ -z "${PYTHON:-}" ]]; then
   fi
   PYTHON="${PYTHON:-python3}"
 fi
-echo "Using Python: $PYTHON ($("$PYTHON" --version 2>&1))"
+echo "Using Python for venv: $PYTHON ($("$PYTHON" --version 2>&1))"
+
+VENV_DIR="$ROOT/build_venv"
+if [[ -d "$VENV_DIR" ]] && [[ "$("$VENV_DIR/bin/python" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))' 2>/dev/null || true)" != "$("$PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')" ]]; then
+  echo "==> Recreating build virtual environment for selected Python"
+  rm -rf "$VENV_DIR"
+fi
+if [[ ! -d "$VENV_DIR" ]]; then
+  echo "==> Creating Python virtual environment: $VENV_DIR"
+  "$PYTHON" -m venv "$VENV_DIR"
+fi
+# shellcheck source=/dev/null
+source "$VENV_DIR/bin/activate"
+trap 'if [[ -n "${VIRTUAL_ENV:-}" ]]; then deactivate 2>/dev/null || true; fi' EXIT
+PYTHON="$VENV_DIR/bin/python"
+echo "Using venv Python: $PYTHON ($("$PYTHON" --version 2>&1))"
 
 DEST="$ROOT/build/tesseract_bundle"
-PNG_MASTER="$ROOT/resources/icon_master.png"
+PNG_MASTER="$ROOT/resources/autoflow_icon.png"
 ICONSET="$ROOT/resources/AutoFlow.iconset"
 ICNS_OUT="$ROOT/resources/AutoFlow.icns"
 
 echo "==> Installing build dependencies (PyInstaller, app requirements)"
 "$PYTHON" -m pip install -q --upgrade pip
-"$PYTHON" -m pip install -q -r "$ROOT/requirements.txt" "pyinstaller>=6.0"
+"$PYTHON" -m pip install -q -r "$ROOT/requirements-desktop.txt" "pyinstaller>=6.0"
 
 find_tesseract() {
   "$PYTHON" <<'PY'
@@ -119,44 +134,11 @@ echo "==> Copying tessdata from $TESS_PREFIX/share/tessdata"
 mkdir -p "$DEST/tessdata"
 cp -R "$TESS_PREFIX/share/tessdata/"* "$DEST/tessdata/"
 
-echo "==> Building placeholder icon (resources/AutoFlow.icns)"
-mkdir -p "$ROOT/resources"
-export ROOT
-"$PYTHON" <<'PY'
-import os
-from pathlib import Path
-
-root = Path(os.environ["ROOT"])
-png = root / "resources" / "icon_master.png"
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except ImportError:
-    raise SystemExit("Pillow should be installed from requirements.txt")
-
-size = 1024
-img = Image.new("RGB", (size, size), "#0f172a")
-d = ImageDraw.Draw(img)
-margin = size // 6
-d.rounded_rectangle(
-    [margin, margin, size - margin, size - margin],
-    radius=size // 8,
-    fill="#1e293b",
-    outline="#38bdf8",
-    width=8,
-)
-try:
-    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", size // 4)
-except Exception:
-    font = ImageFont.load_default()
-text = "AF"
-bbox = d.textbbox((0, 0), text, font=font)
-tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-tx = (size - tw) // 2
-ty = (size - th) // 2 - size // 28
-d.text((tx, ty), text, fill="#f8fafc", font=font)
-png.parent.mkdir(parents=True, exist_ok=True)
-img.save(png)
-PY
+echo "==> Building app icon from resources/autoflow_icon.png"
+if [[ ! -f "$PNG_MASTER" ]]; then
+  echo "Error: $PNG_MASTER not found" >&2
+  exit 1
+fi
 
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
@@ -176,15 +158,15 @@ iconutil -c icns "$ICONSET" -o "$ICNS_OUT"
 echo "==> Running PyInstaller"
 "$PYTHON" -m PyInstaller --clean --noconfirm "$ROOT/autoflow.spec"
 
-echo "==> Build complete: $ROOT/dist/AutoFlow.app"
+echo "==> Build complete: $ROOT/dist/Typestra.app"
 
 if [[ "${CREATE_DMG:-0}" == "1" ]]; then
-  echo "==> Creating dist/AutoFlow.dmg (CREATE_DMG=1)"
+  echo "==> Creating dist/typestra-latest-mac.dmg (CREATE_DMG=1)"
   DMG_TMP="$ROOT/dist/dmg_root"
   rm -rf "$DMG_TMP"
   mkdir -p "$DMG_TMP"
-  cp -R "$ROOT/dist/AutoFlow.app" "$DMG_TMP/"
-  hdiutil create -volname "AutoFlow" -srcfolder "$DMG_TMP" -ov -format UDZO "$ROOT/dist/AutoFlow.dmg"
+  cp -R "$ROOT/dist/Typestra.app" "$DMG_TMP/"
+  hdiutil create -volname "Typestra" -srcfolder "$DMG_TMP" -ov -format UDZO "$ROOT/dist/typestra-latest-mac.dmg"
   rm -rf "$DMG_TMP"
-  echo "    DMG: $ROOT/dist/AutoFlow.dmg"
+  echo "    DMG: $ROOT/dist/typestra-latest-mac.dmg"
 fi

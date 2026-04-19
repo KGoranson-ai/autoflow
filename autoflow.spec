@@ -17,7 +17,7 @@ RUNTIME_HOOK = os.path.join(ROOT, "pyi_rth_autoflow_tesseract.py")
 ICON_ICNS = os.path.join(ROOT, "resources", "AutoFlow.icns")
 TESS_STAGING = os.path.join(ROOT, "build", "tesseract_bundle")
 
-APP_NAME = "AutoFlow"
+APP_NAME = "Typestra"
 BUNDLE_ID = "com.goransondigital.autoflow"
 VERSION = "3.0.0"
 
@@ -134,7 +134,7 @@ app = BUNDLE(
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "11.0",
-        "NSHumanReadableCopyright": "Copyright © AutoFlow",
+        "NSHumanReadableCopyright": "Copyright © Typestra",
         "NSHighResolutionCapable": True,
     },
 )
