@@ -172,6 +172,7 @@ class Typestra:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Activate License…", command=self.activate_license)
+        help_menu.add_command(label="Quick Start Guide", command=self._show_quick_start_dialog)
         help_menu.add_separator()
         help_menu.add_command(label="Pricing", command=lambda: webbrowser.open_new_tab("https://typestra.com/pricing"))
         help_menu.add_command(label="Support", command=lambda: webbrowser.open_new_tab("mailto:support@typestra.com"))
@@ -258,7 +259,7 @@ class Typestra:
     def _show_activation_prompt(self) -> None:
         """No key found — show the Activate menu item in the status bar."""
         self.status_label.config(
-            text="⚠ No license key. Click 'Activate' in the menu to start your free trial.",
+            text="No license key. Start a free trial on typestra.com, then use Help > Activate License to enter your key.",
             foreground="orange",
         )
 
@@ -328,7 +329,7 @@ class Typestra:
         outer = ttk.Frame(dialog, padding=20)
         outer.pack(fill="both", expand=True)
 
-        ttk.Label(outer, text="Enter your Typestra license key:", font=("Arial", 11)).pack(pady=(0, 10))
+        ttk.Label(outer, text="Paste your Typestra license key:", font=("Arial", 11)).pack(pady=(0, 10))
         key_var = tk.StringVar()
         entry = ttk.Entry(outer, textvariable=key_var, font=("Courier", 12), width=36)
         entry.pack(pady=(0, 12))
@@ -368,6 +369,7 @@ class Typestra:
         btn_frame = ttk.Frame(outer)
         btn_frame.pack()
         ttk.Button(btn_frame, text="Activate", command=_submit, width=14).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="Get Trial / Plan", command=self._open_pricing, width=16).pack(side="left", padx=(0, 8))
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy, width=14).pack(side="left")
 
         def _on_return(event):
@@ -413,6 +415,36 @@ class Typestra:
         """Open the Typestra pricing page in the default browser."""
         import webbrowser
         webbrowser.open_new_tab("https://typestra.com/pricing")
+
+    def _show_quick_start_dialog(self) -> None:
+        """Show the longer usage guide without crowding the main window."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Typestra Quick Start")
+        dialog.geometry("560x440")
+        dialog.minsize(520, 400)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        outer = ttk.Frame(dialog, padding=20)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(
+            outer,
+            text="Quick Start Guide",
+            font=("Arial", 14, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+
+        guide = scrolledtext.ScrolledText(
+            outer,
+            wrap=tk.WORD,
+            height=14,
+            font=("Arial", 10),
+        )
+        guide.pack(fill="both", expand=True, pady=(0, 12))
+        guide.insert("1.0", self.instructions_text)
+        guide.configure(state="disabled")
+
+        ttk.Button(outer, text="Close", command=dialog.destroy, width=14).pack(anchor="e")
 
     def _show_upgrade_dialog(
         self,
@@ -512,7 +544,7 @@ class Typestra:
 
     def _build_mode_selector(self, main_frame):
         """Text vs. Spreadsheet mode radio buttons."""
-        mode_frame = ttk.LabelFrame(main_frame, text="Mode Selection", padding="10")
+        mode_frame = ttk.LabelFrame(main_frame, text="1. Choose Mode", padding="10")
         mode_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
         mode_frame.columnconfigure(0, weight=1)
 
@@ -538,7 +570,7 @@ class Typestra:
 
     def _build_input_area(self, main_frame):
         """Scrollable text input, stats/clear/extract row, CSV import button."""
-        self.text_frame = ttk.LabelFrame(main_frame, text="Your Content", padding="10")
+        self.text_frame = ttk.LabelFrame(main_frame, text="2. Add Content", padding="10")
         self.text_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 15))
         self.text_frame.columnconfigure(0, weight=1)
         self.text_frame.rowconfigure(0, weight=1)
@@ -561,7 +593,7 @@ class Typestra:
 
         self.clear_text_btn = ttk.Button(
             self.stats_frame,
-            text="Clear All",
+            text="Clear",
             command=self.clear_text
         )
         self.clear_text_btn.pack(side=tk.LEFT, padx=(10, 0))
@@ -590,7 +622,7 @@ class Typestra:
 
     def _build_settings_panel(self, main_frame):
         """WPM/countdown/humanization sliders, spreadsheet options, humanization checkboxes."""
-        settings_frame = ttk.LabelFrame(main_frame, text="Settings", padding="10")
+        settings_frame = ttk.LabelFrame(main_frame, text="3. Tune Typing", padding="10")
         settings_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
         settings_frame.columnconfigure(1, weight=1)
 
@@ -650,7 +682,7 @@ class Typestra:
         self.add_totals_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             self.sheet_settings_frame,
-            text="☐ Add totals row (SUM formulas)",
+            text="Add totals row (SUM formulas)",
             variable=self.add_totals_var,
             command=self._on_settings_changed,
         ).pack(anchor=tk.W, pady=2)
@@ -658,7 +690,7 @@ class Typestra:
         self.variation_var = tk.BooleanVar(value=True)
         self.variation_check = ttk.Checkbutton(
             settings_frame,
-            text="✓ Speed variation (faster and slower bursts)",
+            text="Speed variation (faster and slower bursts)",
             variable=self.variation_var,
             command=self._on_settings_changed,
         )
@@ -667,7 +699,7 @@ class Typestra:
         self.thinking_var = tk.BooleanVar(value=True)
         self.thinking_check = ttk.Checkbutton(
             settings_frame,
-            text="✓ Thinking pauses (random hesitations while typing)",
+            text="Thinking pauses (random hesitations while typing)",
             variable=self.thinking_var,
             command=self._on_settings_changed,
         )
@@ -676,7 +708,7 @@ class Typestra:
         self.punctuation_var = tk.BooleanVar(value=True)
         self.punctuation_check = ttk.Checkbutton(
             settings_frame,
-            text="✓ Punctuation pauses (longer breaks after sentences)",
+            text="Punctuation pauses (longer breaks after sentences)",
             variable=self.punctuation_var,
             command=self._on_settings_changed,
         )
@@ -685,7 +717,7 @@ class Typestra:
         self.typos_var = tk.BooleanVar(value=True)
         self.typos_check = ttk.Checkbutton(
             settings_frame,
-            text="✓ Realistic typos & corrections (makes and fixes mistakes)",
+            text="Realistic typos and corrections",
             variable=self.typos_var,
             command=self._on_settings_changed,
         )
@@ -703,16 +735,28 @@ class Typestra:
         """Start / Pause / Stop / Clear action buttons."""
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
-        for col in range(4):
+        for col in range(5):
             button_frame.columnconfigure(col, weight=1)
+        button_frame.columnconfigure(0, weight=2)
+        button_frame.columnconfigure(1, weight=2)
 
         _start_tip = "⌘+Enter: Start typing" if self._is_mac else "Ctrl+Enter: Start typing"
-        self.start_button = ttk.Button(
+        self.start_button = tk.Button(
             button_frame,
-            text="▶ Start Typestra",
-            command=self.start_typing
+            text="Start Typestra",
+            command=self.start_typing,
+            bg="#0A84FF",
+            fg="#FFFFFF",
+            activebackground="#006EDB",
+            activeforeground="#FFFFFF",
+            disabledforeground="#D0D0D0",
+            relief="flat",
+            font=("Arial", 11, "bold"),
+            padx=12,
+            pady=7,
+            cursor="hand2",
         )
-        self.start_button.grid(row=0, column=0, padx=(0, 5), sticky=(tk.W, tk.E))
+        self.start_button.grid(row=0, column=0, columnspan=2, padx=(0, 8), sticky=(tk.W, tk.E))
         _attach_tooltip(self.start_button, _start_tip)
 
         self.pause_button = ttk.Button(
@@ -721,7 +765,7 @@ class Typestra:
             command=self.toggle_pause,
             state=tk.DISABLED
         )
-        self.pause_button.grid(row=0, column=1, padx=5, sticky=(tk.W, tk.E))
+        self.pause_button.grid(row=0, column=2, padx=5, sticky=(tk.W, tk.E))
 
         self.stop_button = ttk.Button(
             button_frame,
@@ -729,14 +773,14 @@ class Typestra:
             command=self.stop_typing,
             state=tk.DISABLED
         )
-        self.stop_button.grid(row=0, column=2, padx=5, sticky=(tk.W, tk.E))
+        self.stop_button.grid(row=0, column=3, padx=5, sticky=(tk.W, tk.E))
 
         self.clear_button = ttk.Button(
             button_frame,
             text="🗑 Clear",
             command=self.clear_text
         )
-        self.clear_button.grid(row=0, column=3, padx=(5, 0), sticky=(tk.W, tk.E))
+        self.clear_button.grid(row=0, column=4, padx=(5, 0), sticky=(tk.W, tk.E))
 
     def _build_status_area(self, main_frame):
         """Status label (shown under the button row)."""
@@ -746,14 +790,14 @@ class Typestra:
 
         self.status_label = ttk.Label(
             status_frame,
-            text="Ready. Select mode and paste your content.",
+            text="Ready. Add content, tune typing, then click Start Typestra.",
             font=("Arial", 10)
         )
         self.status_label.grid(row=0, column=0, sticky=tk.W)
 
     def _build_instructions(self, main_frame):
-        """Quick Start help text."""
-        instructions_frame = ttk.LabelFrame(main_frame, text="Quick Start", padding="10")
+        """Compact Quick Start help text."""
+        instructions_frame = ttk.LabelFrame(main_frame, text="Help", padding="10")
         instructions_frame.grid(row=7, column=0, sticky=(tk.W, tk.E))
 
         _sk = (
@@ -761,30 +805,35 @@ class Typestra:
             if self._is_mac
             else "Ctrl+V Paste · Ctrl+K Clear · Ctrl+Enter Start · Ctrl+Q Quit"
         )
-        self.instructions_text = f"""KEYBOARD: {_sk} (paste/clear/start shortcuts are off while Typestra is typing; quit always saves)
+        self.instructions_text = f"""Keyboard: {_sk} (paste/clear/start shortcuts are off while Typestra is typing; quit always saves)
 
-TEXT MODE: Paste your content (or use 📷 Extract from Image) → Click Start → Switch to target app
-SPREADSHEET MODE: Paste CSV data → Click Start → Click first cell (A1)
+Text Mode: Paste your content or use Extract from Image, click Start, then switch to the target app.
+Spreadsheet Mode: Paste CSV data, click Start, then click the first cell (A1).
 
-NOTE: Accented characters are automatically converted to plain text:
-• café → cafe, José → Jose, résumé → resume
-• This ensures reliable typing across all apps
+Accented characters are converted to plain text for reliability:
+cafe, Jose, resume
 
-PASTING TIPS:
-• Paste formatted text directly - Typestra handles bullets (•), apostrophes (')
-• Lists with numbers/letters work great (a., b., 1., 2.)
+Pasting Tips:
+Paste formatted text directly. Typestra handles bullets, apostrophes, and numbered lists.
 
-PAUSE/RESUME: Press F8 anytime OR click Typestra window to auto-pause
+Pause/Resume: Press F8 anytime or click the Typestra window to auto-pause.
 
-EMERGENCY STOP: Move mouse to top-left corner"""
+Emergency Stop: Move mouse to top-left corner."""
 
         instructions_label = ttk.Label(
             instructions_frame,
-            text=self.instructions_text,
+            text="Text: paste content, click Start, switch apps. Spreadsheet: paste CSV, click Start, click A1.",
             justify=tk.LEFT,
             font=("Arial", 9)
         )
         instructions_label.grid(row=0, column=0, sticky=tk.W)
+        ttk.Button(
+            instructions_frame,
+            text="Full Guide",
+            command=self._show_quick_start_dialog,
+            width=14,
+        ).grid(row=0, column=1, sticky=tk.E, padx=(12, 0))
+        instructions_frame.columnconfigure(0, weight=1)
 
     def create_smart_fill_tab(self, parent):
         self.smart_fill_frame = parent
@@ -2021,7 +2070,7 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         
         if mode == "text":
             # Text mode settings
-            self.text_frame.config(text="Your Content")
+            self.text_frame.config(text="2. Add Content")
             self.help_label.config(text="")
             
             # Hide spreadsheet-specific elements
@@ -2036,7 +2085,7 @@ EMERGENCY STOP: Move mouse to top-left corner"""
             
         else:  # spreadsheet
             # Spreadsheet mode settings
-            self.text_frame.config(text="Spreadsheet Data (CSV Format)")
+            self.text_frame.config(text="2. Add Spreadsheet Data")
             self.help_label.config(text="Format: Column1,Column2,Column3")
             
             # Show spreadsheet-specific elements
