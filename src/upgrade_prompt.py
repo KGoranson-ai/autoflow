@@ -221,9 +221,9 @@ class UpgradeDialog(tk.Toplevel):
         plan_frame.pack(fill="x", pady=(0, 16))
 
         plans = [
-            ("Solo",   "$19/mo",    "Unlimited text blocks, keyboard shortcuts, spreadsheet mode"),
-            ("Pro",    "$39/mo",    "+ OCR text capture, auto-calculations, multi-device (2)"),
-            ("Team",   "$79/mo",    "+ Scheduled scripts, team management, dedicated support"),
+            ("Solo",   "$10/mo",    "Unlimited text blocks, keyboard shortcuts, spreadsheet mode"),
+            ("Pro",    "$20/mo",    "+ OCR text capture, auto-calculations, multi-device (2)"),
+            ("Team",   "$40/mo",    "+ Scheduled scripts, team management, dedicated support"),
         ]
         for name, price, desc in plans:
             row = ttk.Frame(plan_frame)

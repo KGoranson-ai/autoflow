@@ -50,7 +50,7 @@ STRIPE_PRICE_MAP_ANNUAL = {
 }
 
 # Trial duration in days
-TRIAL_DAYS = 14
+TRIAL_DAYS = 7
 
 
 def _is_authorized_admin_request() -> bool:
@@ -529,11 +529,11 @@ def create_app() -> Flask:
                 resend.Emails.send({
                     "from": "Typestra <noreply@typestra.com>",
                     "to": [email],
-                    "subject": "Your Typestra Free Trial — 14 Days Free",
+                    "subject": "Your Typestra Free Trial — 7 Days Free",
                     "html": f"""
                     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
                         <h2>Start your Typestra trial 🎉</h2>
-                        <p>Your 14-day free trial is active. Here's your license key:</p>
+                        <p>Your 7-day free trial is active. Here's your license key:</p>
                         <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 22px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px; margin: 20px 0;">
                             {trial_key}
                         </div>
