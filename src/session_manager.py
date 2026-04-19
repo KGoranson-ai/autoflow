@@ -5,7 +5,7 @@ Each session targets one browser tab via a TabInjector emit backend.
 Sessions run in independent threads — one can pause, fail, or finish
 without affecting the others.
 
-License gate: Pro+ and Team only. Raises FeatureNotAvailableError for
+License gate: Team only. Raises FeatureNotAvailableError for
 lower tiers.
 
 Usage:
@@ -41,13 +41,13 @@ class FeatureNotAvailableError(Exception):
     """Raised when multi-form is accessed on a non-qualifying tier."""
 
 
-def _require_pro_plus(license_info) -> None:
+def _require_team(license_info) -> None:
     if license_info is None:
         return
     tier = getattr(license_info, "tier", "solo")
-    if tier not in ("pro_plus", "team"):
+    if tier != "team":
         raise FeatureNotAvailableError(
-            "Multi-Form Fill requires a Pro+ or Team license. "
+            "Multi-Form Fill requires a Team license. "
             "Upgrade at typestra.com to unlock this feature."
         )
 
@@ -104,7 +104,7 @@ class SessionManager:
 
     Args:
         license_info: LicenseInfo object from LicenseManager. Used to gate
-                      the feature to Pro+ and Team tiers.
+                      the feature to Team tier.
         config:       TypingConfig shared across all sessions. If None, a
                       default config is used.
         on_session_update: Optional callback(session_id, session) fired
@@ -117,7 +117,7 @@ class SessionManager:
         config=None,
         on_session_update: Optional[Callable[[int, Session], None]] = None,
     ) -> None:
-        _require_pro_plus(license_info)
+        _require_team(license_info)
         self._license_info = license_info
         self._config = config
         self._on_session_update = on_session_update

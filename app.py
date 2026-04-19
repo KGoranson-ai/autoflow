@@ -36,11 +36,10 @@ STRIPE_PRICE_MAP = {
     "team": os.environ.get("STRIPE_PRICE_TEAM"),
 }
 
-# Map frontend tier IDs to DB/PG enum values
-TIER_MAP = {
-    "solo": "basic",
-    "pro": "pro",
-    "team": "premium",
+PUBLIC_TIERS = frozenset({"solo", "pro", "team"})
+LEGACY_TIER_ALIASES = {
+    "basic": "solo",
+    "premium": "team",
 }
 
 # Map frontend tier IDs to Stripe price IDs (annual)
@@ -54,17 +53,247 @@ STRIPE_PRICE_MAP_ANNUAL = {
 TRIAL_DAYS = 14
 
 
+def _is_authorized_admin_request() -> bool:
+    expected = os.environ.get("ADMIN_SECRET")
+    provided = request.headers.get("X-Admin-Secret", "")
+    if not expected:
+        logger.error("ADMIN_SECRET is not set; rejecting admin request")
+        return False
+    return secrets.compare_digest(provided, expected)
+
+
+def _canonical_tier(tier: str | None) -> str | None:
+    if not tier:
+        return None
+    normalized = str(tier).strip().lower()
+    return LEGACY_TIER_ALIASES.get(normalized, normalized)
+
+
+def _rate_limit_storage_uri() -> str:
+    return (
+        os.environ.get("RATE_LIMIT_STORAGE_URI")
+        or os.environ.get("REDIS_URL")
+        or "memory://"
+    )
+
+
+def _auto_init_db_enabled() -> bool:
+    return os.environ.get("AUTO_INIT_DB", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _send_license_email(email: str, license_key: str) -> None:
+    resend.api_key = os.environ.get("RESEND_API_KEY")
+    resend.Emails.send({
+        "from": "Typestra <noreply@typestra.com>",
+        "to": [email],
+        "subject": "Your Typestra License Key",
+        "html": f"""
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Welcome to Typestra!</h2>
+            <p>Thank you for your purchase. Here is your license key:</p>
+            <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 24px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px;">
+                {license_key}
+            </div>
+            <p>To activate:</p>
+            <ol>
+                <li>Download Typestra at <a href="https://typestra.com/download">typestra.com/download</a></li>
+                <li>Open the app and click Activate</li>
+                <li>Enter your license key</li>
+            </ol>
+            <p>Keep this email — you'll need the key if you reinstall.</p>
+            <p>Questions? Reply to this email or contact support@typestra.com</p>
+        </div>
+        """
+    })
+
+
+def _send_trial_converted_email(email: str) -> None:
+    resend.api_key = os.environ.get("RESEND_API_KEY")
+    resend.Emails.send({
+        "from": "Typestra <noreply@typestra.com>",
+        "to": [email],
+        "subject": "Your Typestra Trial Is Now Active",
+        "html": """
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Your Typestra subscription is active.</h2>
+            <p>Your trial license has been converted to a paid license. You can keep using the same license key already sent to you.</p>
+            <p>Questions? Reply to this email or contact support@typestra.com</p>
+        </div>
+        """
+    })
+
+
+def _record_referral(
+    session,
+    *,
+    ref_code: str | None,
+    email: str,
+    stripe_subscription_id: str | None,
+    stripe_customer_id: str | None,
+    amount_total: int,
+) -> None:
+    if not ref_code:
+        return
+
+    from sqlalchemy import select
+
+    affiliate = session.execute(
+        select(Affiliate).where(
+            Affiliate.ref_code == ref_code,
+            Affiliate.status == "active"
+        )
+    ).scalar_one_or_none()
+
+    if not affiliate:
+        return
+
+    is_self_referral = affiliate.email.lower() == (email or "").lower()
+    referral = Referral(
+        affiliate_id=affiliate.id,
+        customer_email=email,
+        stripe_subscription_id=stripe_subscription_id,
+        stripe_customer_id=stripe_customer_id,
+        commission_percent=affiliate.commission_percent,
+        discount_percent=affiliate.discount_percent,
+        monthly_amount=amount_total,
+        commission_ends_at=datetime.now(timezone.utc) + timedelta(days=180),
+        self_referral_attempt=is_self_referral,
+    )
+    session.add(referral)
+    if is_self_referral:
+        logger.warning(f"Self-referral attempt blocked: {email} used own ref code {ref_code}")
+    else:
+        logger.info(f"Referral tracked: {email} via {ref_code}")
+
+
+def _convert_trial_subscription(
+    session,
+    *,
+    trial_email: str,
+    tier: str,
+    stripe_customer_id: str | None,
+    stripe_subscription_id: str | None,
+) -> bool:
+    from sqlalchemy import select
+    from database import Subscription
+
+    trial = session.execute(
+        select(TrialRequest).where(
+            TrialRequest.email == trial_email,
+            TrialRequest.converted == False,
+        )
+    ).scalar_one_or_none()
+
+    if trial is None:
+        return False
+
+    trial.converted = True
+    sub = session.execute(
+        select(Subscription).where(
+            Subscription.license_key_hash == trial.license_key_hash
+        )
+    ).scalar_one_or_none()
+
+    if sub is not None:
+        sub.tier = tier
+        sub.status = "active"
+        sub.is_trial = False
+        sub.converted_from_trial = True
+        sub.stripe_customer_id = stripe_customer_id
+        sub.stripe_subscription_id = stripe_subscription_id
+        sub.current_period_end = None
+
+    return True
+
+
+def _process_checkout_completed(session_data: dict) -> None:
+    from license import create_subscription
+
+    metadata = session_data.get("metadata", {}) or {}
+    email = (session_data.get("customer_details", {}) or {}).get("email")
+    trial_email = (metadata.get("trial_email") or "").strip().lower()
+    if not email and trial_email:
+        email = trial_email
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        raise ValueError("Stripe checkout session is missing a valid customer email")
+
+    stripe_customer_id = session_data.get("customer")
+    stripe_subscription_id = session_data.get("subscription")
+    tier = _canonical_tier(metadata.get("tier", "solo"))
+    if tier not in PUBLIC_TIERS:
+        raise ValueError(f"Invalid checkout tier: {tier}")
+
+    ref_code = metadata.get("ref_code")
+    amount_total = session_data.get("amount_total", 0)
+
+    db_session = current_app.config.get("db_session")
+    if not db_session:
+        raise RuntimeError("Database session is not configured")
+
+    s = db_session()
+    try:
+        converted_trial = False
+        if trial_email:
+            converted_trial = _convert_trial_subscription(
+                s,
+                trial_email=trial_email,
+                tier=tier,
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id,
+            )
+
+        if converted_trial:
+            _record_referral(
+                s,
+                ref_code=ref_code,
+                email=email,
+                stripe_subscription_id=stripe_subscription_id,
+                stripe_customer_id=stripe_customer_id,
+                amount_total=amount_total,
+            )
+            s.commit()
+            _send_trial_converted_email(email)
+            logger.info(f"Trial converted for {email}")
+            return
+
+        result = create_subscription(
+            session=s,
+            email=email,
+            tier=tier,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+        )
+        license_key = result["license_key"]
+        _record_referral(
+            s,
+            ref_code=ref_code,
+            email=email,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_customer_id=stripe_customer_id,
+            amount_total=amount_total,
+        )
+        s.commit()
+        _send_license_email(email, license_key)
+        logger.info(f"License created and emailed to {email}")
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-change-me")
     app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MiB
 
-    # Initialize rate limiter (in-memory, no Redis)
+    # Initialize rate limiter. Use REDIS_URL/RATE_LIMIT_STORAGE_URI in production.
     limiter = Limiter(
         app=app,
         key_func=get_remote_address,
         default_limits=["200 per day"],
-        storage_uri="memory://",
+        storage_uri=_rate_limit_storage_uri(),
     )
 
     raw_cors_origins = os.environ.get(
@@ -100,7 +329,8 @@ def create_app() -> Flask:
         if "db_session" not in app.config:
             try:
                 engine = create_engine_from_env()
-                init_db(engine)
+                if _auto_init_db_enabled():
+                    init_db(engine)
                 app.config["db_session"] = sessionmaker(bind=engine)
                 logger.info("Database initialized successfully")
             except Exception as e:
@@ -159,7 +389,7 @@ def create_app() -> Flask:
     def create_checkout_session():
         try:
             data = request.get_json()
-            tier = data.get("tier")
+            tier = _canonical_tier(data.get("tier"))
             billing = data.get("billing", "monthly")  # "monthly" or "annual"
             ref_code = data.get("ref_code")
 
@@ -220,12 +450,12 @@ def create_app() -> Flask:
         try:
             data = request.get_json()
             email = (data.get("email") or "").strip().lower()
-            tier = data.get("tier", "solo")
+            tier = _canonical_tier(data.get("tier", "solo"))
 
             if not email or "@" not in email:
                 return jsonify({"error": "A valid email address is required"}), 400
 
-            if tier not in STRIPE_PRICE_MAP:
+            if tier not in PUBLIC_TIERS:
                 return jsonify({"error": "Invalid tier. Must be solo, pro, or team."}), 400
 
             Session = current_app.config.get("db_session")
@@ -263,7 +493,7 @@ def create_app() -> Flask:
 
                 trial_request = TrialRequest(
                     email=email,
-                    tier=TIER_MAP[tier],
+                    tier=tier,
                     license_key_hash=key_hash,
                     trial_end=trial_end,
                     converted=False,
@@ -282,7 +512,7 @@ def create_app() -> Flask:
                 trial_sub = Subscription(
                     user_id=user.id,
                     license_key_hash=key_hash,
-                    tier=TIER_MAP[tier],
+                    tier=tier,
                     stripe_customer_id=None,
                     stripe_subscription_id=None,
                     status="active",
@@ -345,13 +575,13 @@ def create_app() -> Flask:
         try:
             data = request.get_json()
             email = (data.get("email") or "").strip().lower()
-            tier = data.get("tier", "solo")
+            tier = _canonical_tier(data.get("tier", "solo"))
             billing = data.get("billing", "monthly")
 
             if not email or "@" not in email:
                 return jsonify({"error": "A valid email address is required"}), 400
 
-            if tier not in STRIPE_PRICE_MAP:
+            if tier not in PUBLIC_TIERS:
                 return jsonify({"error": "Invalid tier"}), 400
 
             Session = current_app.config.get("db_session")
@@ -436,88 +666,8 @@ def create_app() -> Flask:
 
         if event["type"] == "checkout.session.completed":
             session_data = event["data"]["object"]
-            email = session_data.get("customer_details", {}).get("email")
-            stripe_customer_id = session_data.get("customer")
-            stripe_subscription_id = session_data.get("subscription")
-            tier = session_data.get("metadata", {}).get("tier", "basic")
-            ref_code = session_data.get("metadata", {}).get("ref_code")
-            amount_total = session_data.get("amount_total", 0)
-
             try:
-                from license import create_subscription
-                from sqlalchemy import select
-                db_session = current_app.config.get("db_session")
-                if db_session:
-                    s = db_session()
-                    try:
-                        result = create_subscription(
-                            session=s,
-                            email=email,
-                            tier=TIER_MAP.get(tier, tier),
-                            stripe_customer_id=stripe_customer_id,
-                            stripe_subscription_id=stripe_subscription_id,
-                        )
-                        s.commit()
-                        license_key = result["license_key"]
-
-                        # Handle referral tracking
-                        if ref_code:
-                            affiliate = s.execute(
-                                select(Affiliate).where(
-                                    Affiliate.ref_code == ref_code,
-                                    Affiliate.status == "active"
-                                )
-                            ).scalar_one_or_none()
-
-                            if affiliate:
-                                is_self_referral = affiliate.email.lower() == (email or "").lower()
-                                referral = Referral(
-                                    affiliate_id=affiliate.id,
-                                    customer_email=email,
-                                    stripe_subscription_id=stripe_subscription_id,
-                                    stripe_customer_id=stripe_customer_id,
-                                    commission_percent=affiliate.commission_percent,
-                                    discount_percent=affiliate.discount_percent,
-                                    monthly_amount=amount_total,
-                                    commission_ends_at=datetime.now(timezone.utc) + timedelta(days=180),
-                                    self_referral_attempt=is_self_referral,
-                                )
-                                s.add(referral)
-                                s.commit()
-                                if is_self_referral:
-                                    logger.warning(f"Self-referral attempt blocked: {email} used own ref code {ref_code}")
-                                else:
-                                    logger.info(f"Referral tracked: {email} via {ref_code}")
-
-                        resend.api_key = os.environ.get("RESEND_API_KEY")
-                        resend.Emails.send({
-                            "from": "Typestra <noreply@typestra.com>",
-                            "to": [email],
-                            "subject": "Your Typestra License Key",
-                            "html": f"""
-                            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-                                <h2>Welcome to Typestra!</h2>
-                                <p>Thank you for your purchase. Here is your license key:</p>
-                                <div style="background: #1a1a2e; color: #00f5d4; font-family: monospace; font-size: 24px; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 4px;">
-                                    {license_key}
-                                </div>
-                                <p>To activate:</p>
-                                <ol>
-                                    <li>Download Typestra at <a href="https://typestra.com/download">typestra.com/download</a></li>
-                                    <li>Open the app and click Activate</li>
-                                    <li>Enter your license key</li>
-                                </ol>
-                                <p>Keep this email — you'll need the key if you reinstall.</p>
-                                <p>Questions? Reply to this email or contact support@typestra.com</p>
-                            </div>
-                            """
-                        })
-                        logger.info(f"License created and emailed to {email}")
-                    except Exception as e:
-                        s.rollback()
-                        logger.error(f"Failed to create subscription or send email: {e}")
-                    finally:
-                        s.close()
+                _process_checkout_completed(session_data)
             except Exception as e:
                 logger.error(f"Webhook processing error: {e}")
 
@@ -525,8 +675,7 @@ def create_app() -> Flask:
 
     @app.route("/api/admin/cancel-license", methods=["POST"])
     def admin_cancel_license():
-        admin_secret = request.headers.get("X-Admin-Secret")
-        if admin_secret != os.environ.get("ADMIN_SECRET"):
+        if not _is_authorized_admin_request():
             return jsonify({"error": "Unauthorized"}), 401
 
         data = request.get_json()
@@ -639,8 +788,7 @@ def create_app() -> Flask:
 
     @app.route("/api/admin/affiliate/approve", methods=["POST"])
     def admin_affiliate_approve():
-        admin_secret = request.headers.get("X-Admin-Secret")
-        if admin_secret != os.environ.get("ADMIN_SECRET"):
+        if not _is_authorized_admin_request():
             return jsonify({"error": "Unauthorized"}), 401
 
         data = request.get_json()
@@ -713,8 +861,7 @@ def create_app() -> Flask:
 
     @app.route("/api/admin/affiliates", methods=["GET"])
     def admin_affiliates():
-        admin_secret = request.headers.get("X-Admin-Secret")
-        if admin_secret != os.environ.get("ADMIN_SECRET"):
+        if not _is_authorized_admin_request():
             return jsonify({"error": "Unauthorized"}), 401
 
         db_session = current_app.config.get("db_session")

@@ -21,6 +21,7 @@ import json
 import os
 import re
 import unicodedata
+import webbrowser
 from datetime import datetime
 from typing import List, Tuple, Optional, Callable
 
@@ -2136,7 +2137,7 @@ EMERGENCY STOP: Move mouse to top-left corner"""
         self.extract_image_btn.config(state=tk.DISABLED)
         result_holder = []
 
-        license_info = getattr(self.license_manager, "get_license_info", lambda: None)() if hasattr(self, "license_manager") else None
+        license_info = self.license_manager.get_license_info()
         ocr = OCRCapture(license_info=license_info)
 
         def do_ocr():

@@ -13,7 +13,7 @@ authors = [
     { name = "AutoFlow Contributors" }
 ]
 dependencies = [
-    "pyautogui",
+    "pynput",
 ]
 
 [project.optional-dependencies]

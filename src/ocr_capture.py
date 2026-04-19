@@ -1,5 +1,5 @@
 """
-OCR Text Capture — Pro+ feature.
+OCR Text Capture — Pro and Team feature.
 Extracts text from images and PDFs using Docling (primary) with a
 pytesseract fallback if Docling is unavailable. Digital PDFs use
 pdfplumber for the fast embedded-text path.
@@ -17,21 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 class FeatureNotAvailableError(Exception):
-    """Raised when a Pro+ feature is accessed on a lower tier."""
+    """Raised when OCR is accessed on a lower tier."""
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _require_pro_plus(license_info) -> None:
-    """Gate: raise FeatureNotAvailableError if tier is not Pro+/Team."""
+def _require_pro_or_team(license_info) -> None:
+    """Gate: raise FeatureNotAvailableError if tier is not Pro or Team."""
     if license_info is None:
         return  # No license object passed — caller's responsibility to gate
     tier = getattr(license_info, "tier", "solo")
-    if tier not in ("pro_plus", "team"):
+    if tier not in ("pro", "team"):
         raise FeatureNotAvailableError(
-            "OCR Text Capture requires a Pro+ or Team license. "
+            "OCR Text Capture requires a Pro or Team license. "
             "Upgrade at typestra.com to unlock this feature."
         )
 
@@ -166,11 +166,11 @@ class OCRCapture:
             Normalized text string safe for typing or saving as a block.
 
         Raises:
-            FeatureNotAvailableError: if license tier is not Pro+/Team.
+            FeatureNotAvailableError: if license tier is not Pro or Team.
             FileNotFoundError: if the file does not exist.
             ValueError: if the file type is unsupported.
         """
-        _require_pro_plus(self._license_info)
+        _require_pro_or_team(self._license_info)
 
         path = os.path.expanduser(file_path)
         if not os.path.exists(path):

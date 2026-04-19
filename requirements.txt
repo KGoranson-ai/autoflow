@@ -16,9 +16,11 @@ pandas>=2.0.0
 Flask==3.0.0
 flask-cors==4.0.0
 flask-limiter>=3.5.0
+redis>=5.0.0
 # PostgreSQL (psycopg2; SQLAlchemy postgresql+psycopg2://).
 psycopg2-binary>=2.9.9
 SQLAlchemy>=2.0.36,<3
+alembic>=1.13.0,<2
 python-dotenv==1.0.0
 stripe==7.0.0
 cryptography==41.0.7

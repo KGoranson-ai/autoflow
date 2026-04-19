@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 _LICENSE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 
 _VALID_TIERS = frozenset({"solo", "pro", "team"})
+_LEGACY_TIER_ALIASES = {
+    "basic": "solo",
+    "premium": "team",
+}
 
 _MAX_KEY_GENERATION_ATTEMPTS = 32
 
@@ -60,6 +64,13 @@ def _get_license_salt() -> str:
     return os.environ.get("LICENSE_SALT", "")
 
 
+def _canonical_tier(tier: Optional[str]) -> Optional[str]:
+    if tier is None:
+        return None
+    normalized = str(tier).strip().lower()
+    return _LEGACY_TIER_ALIASES.get(normalized, normalized)
+
+
 def create_subscription(
     session: Session,
     email: str,
@@ -79,6 +90,7 @@ def create_subscription(
     if not normalized_email or "@" not in normalized_email:
         raise ValueError("A valid email address is required")
 
+    tier = _canonical_tier(tier)
     if tier not in _VALID_TIERS:
         raise ValueError(f"tier must be one of {sorted(_VALID_TIERS)}")
 
@@ -184,7 +196,7 @@ def validate_license(
     if sub is not None:
         if sub.status == "active":
             valid = True
-            tier = sub.tier
+            tier = _canonical_tier(sub.tier)
             if sub.is_trial and sub.trial_end is not None:
                 is_trial = True
                 expires = sub.trial_end.isoformat()
@@ -208,7 +220,7 @@ def validate_license(
             if trial.trial_end > datetime.now(timezone.utc):
                 valid = True
                 is_trial = True
-                tier = trial.tier
+                tier = _canonical_tier(trial.tier)
                 expires = trial.trial_end.isoformat()
             else:
                 logger.debug("validate_license: trial expired (trial_end=%s)", trial.trial_end)

@@ -1,16 +1,66 @@
 """
 TypingEngine - Pure typing automation engine (no GUI).
 All pause, burst, typo, and delay logic lives here.
-Uses pyautogui only for keystroke output.
+Uses pynput for keystroke output (handles Unicode natively).
 """
 
-import pyautogui
+import logging
 import time
 import random
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import List, Callable, Optional
+
+try:
+    from pynput.keyboard import Controller as _KeyboardController, Key as _Key
+    _PYNPUT_IMPORT_ERROR: Optional[BaseException] = None
+except Exception as _pynput_exc:  # headless / missing backend at import time
+    _KeyboardController = None  # type: ignore[assignment]
+    _Key = None  # type: ignore[assignment]
+    _PYNPUT_IMPORT_ERROR = _pynput_exc
+
+
+logger = logging.getLogger(__name__)
+
+_kb = None  # lazily instantiated — avoids failing on headless imports
+
+
+def _get_kb():
+    """Return a module-level pynput Controller, creating it on first use."""
+    global _kb
+    if _kb is None:
+        if _KeyboardController is None:
+            raise RuntimeError(
+                f"pynput unavailable: {_PYNPUT_IMPORT_ERROR}"
+            )
+        _kb = _KeyboardController()
+    return _kb
+
+# HumanTyping-inspired timing constants
+_COMMON_BIGRAMS = {
+    "th", "he", "in", "er", "an", "re", "on", "en", "at", "ou",
+    "it", "is", "ar", "st", "to", "nt", "nd", "ha", "es", "et",
+    "ed", "te", "ti", "or", "hi", "as", "ne", "ng", "al", "se",
+    "le", "of", "de", "io", "ea", "li", "ve", "me", "co", "ri",
+}
+_BIGRAM_SPEED_BOOST = 0.6
+_COMMON_WORD_BOOST = 0.65
+_COMPLEX_WORD_PENALTY = 1.25
+_FATIGUE_FACTOR = 1.0004
+
+_COMMON_WORDS = {
+    "the", "be", "to", "of", "and", "a", "in", "that", "have", "it",
+    "for", "not", "on", "with", "he", "as", "you", "do", "at", "this",
+    "but", "his", "by", "from", "they", "we", "say", "her", "she", "or",
+    "an", "will", "my", "one", "all", "would", "there", "their", "what", "so",
+    "up", "out", "if", "about", "who", "get", "which", "go", "me", "when",
+    "make", "can", "like", "time", "no", "just", "him", "know", "take", "people",
+    "into", "year", "your", "good", "some", "could", "them", "see", "other", "than",
+    "then", "now", "look", "only", "come", "its", "over", "think", "also", "back",
+    "after", "use", "two", "how", "our", "work", "first", "well", "way", "even",
+    "new", "want", "because", "any", "these", "give", "day", "most", "us", "is",
+}
 
 
 @dataclass
@@ -40,11 +90,18 @@ class TypingEngine:
         should_stop: Optional[Callable[[], bool]] = None,
         is_paused: Optional[Callable[[], bool]] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        emit_character: Optional[Callable[[str], None]] = None,
+        emit_key: Optional[Callable[[str], None]] = None,
     ):
         self.config = config
         self._should_stop = should_stop if should_stop is not None else (lambda: False)
         self._is_paused = is_paused if is_paused is not None else (lambda: False)
         self._on_status = on_status if on_status is not None else (lambda s: None)
+        self._emit_character = emit_character
+        self._emit_key = emit_key
+
+    def _debug(self, message: str) -> None:
+        logger.debug(message)
 
     @staticmethod
     def normalize_special_chars(text: str) -> str:
@@ -127,17 +184,94 @@ class TypingEngine:
                 return True
         return False
 
+    def _pg_write(self, text: str, *, interval: float = 0) -> None:
+        """Emit typed text; uses pynput unless emit_character is set (e.g. Smart Fill)."""
+        if self._emit_character:
+            if not text:
+                return
+            for i, ch in enumerate(text):
+                self._emit_character(ch)
+                if interval > 0 and i < len(text) - 1:
+                    time.sleep(interval)
+            return
+
+        if not text:
+            return
+
+        kb = _get_kb()
+        invalid_exc = getattr(_KeyboardController, "InvalidCharacterException", None)
+        for i, ch in enumerate(text):
+            try:
+                kb.type(ch)
+            except Exception as exc:
+                if invalid_exc is not None and isinstance(exc, invalid_exc):
+                    logger.warning("pynput could not type character %r; skipping", ch)
+                else:
+                    logger.warning("pynput type error for %r: %s", ch, exc)
+            if interval > 0 and i < len(text) - 1:
+                time.sleep(interval)
+
+    def _pg_press(self, key: str) -> None:
+        """Emit a key press; uses pynput unless emit_key is set."""
+        if self._emit_key:
+            self._emit_key(key)
+            return
+        kb = _get_kb()
+        target = (getattr(_Key, key, None) if _Key is not None else None) or key
+        try:
+            kb.tap(target)
+        except Exception as exc:
+            logger.warning("pynput tap error for %r: %s", key, exc)
+
     def _get_char_delay(
-        self, wpm: int, use_variation: bool, human_level: int
+        self,
+        wpm: int,
+        use_variation: bool,
+        human_level: int,
+        prev_char: str = "",
+        current_char: str = "",
+        current_word: str = "",
+        fatigue_multiplier: float = 1.0,
     ) -> float:
-        """Calculate delay between characters with human-like variation."""
+        """Calculate delay between characters with human-like variation.
+
+        Incorporates bigram acceleration, common-word awareness, complex-word
+        penalty, and fatigue multiplier (HumanTyping-inspired).
+        """
         base_delay = 60.0 / (wpm * 5)
+        base_delay *= fatigue_multiplier
+
+        if prev_char and current_char:
+            bigram = (prev_char + current_char).lower()
+            if bigram in _COMMON_BIGRAMS:
+                base_delay *= _BIGRAM_SPEED_BOOST
+
+        if current_word:
+            lw = current_word.lower()
+            if lw in _COMMON_WORDS:
+                base_delay *= _COMMON_WORD_BOOST
+            elif len(current_word) >= 8:
+                base_delay *= _COMPLEX_WORD_PENALTY
+
         if use_variation:
             variation_percent = 0.3 + (human_level * 0.15)
             variation = base_delay * variation_percent
             delay = base_delay + random.uniform(-variation, variation)
             return max(delay, base_delay * 0.3)
         return base_delay
+
+    @staticmethod
+    def _word_at(line: str, idx: int) -> str:
+        """Return the whitespace-delimited word containing position idx."""
+        if idx < 0 or idx >= len(line):
+            return ""
+        start = idx
+        while start > 0 and not line[start - 1].isspace():
+            start -= 1
+        end = idx
+        while end < len(line) and not line[end].isspace():
+            end += 1
+        return line[start:end]
 
     def type_text(self, text: str) -> None:
         """
@@ -153,22 +287,33 @@ class TypingEngine:
         use_punctuation = cfg.punctuation_pauses
         use_typos = cfg.typos_enabled
 
+        self._debug(
+            "type_text start: "
+            f"chars={len(text)}, countdown={countdown}, wpm={wpm}, "
+            f"human_level={human_level}, variation={use_variation}, "
+            f"thinking={use_thinking}, punctuation={use_punctuation}, typos={use_typos}"
+        )
         # Countdown
         for i in range(countdown, 0, -1):
             if self._should_stop():
+                self._debug("type_text aborted during countdown by should_stop()")
                 return
             self._on_status(f"⏱ Starting in {i}... Switch to target app NOW!")
             time.sleep(1)
 
         if self._should_stop():
+            self._debug("type_text aborted before typing by should_stop()")
             return
 
         self._on_status("⌨️ Typing... (Auto-handling list formatting)")
         text = self.normalize_special_chars(text)
         lines = text.split("\n")
-        total_chars = len(text)
+        total_chars = len(text) if len(text) > 0 else 1
+        self._debug(f"type_text normalized chars={total_chars}, lines={len(lines)}")
         chars_since_pause = 0
         chars_typed = 0
+        fatigue_multiplier = 1.0
+        prev_char = ""
 
         wrong_chars = {
             "a": "sq", "b": "vn", "c": "xv", "d": "sf", "e": "wr",
@@ -181,6 +326,7 @@ class TypingEngine:
 
         for line_idx, line in enumerate(lines):
             if self._should_stop():
+                self._debug(f"type_text aborted at line_idx={line_idx} by should_stop()")
                 return
 
             is_list_item = self._is_list_marker(line)
@@ -204,17 +350,71 @@ class TypingEngine:
                     time.sleep(0.1)
 
                 if self._should_stop():
+                    self._debug(
+                        f"type_text aborted at line_idx={line_idx} char_idx={i} by should_stop()"
+                    )
                     return
 
                 char = line_to_type[i]
-                should_typo = (
+                current_word = self._word_at(line_to_type, i)
+
+                # Swap error: type current+next in wrong order, then fix.
+                can_swap = (
                     use_typos
+                    and human_level >= 2
+                    and i < len(line_to_type) - 1
+                    and char.isalnum()
+                    and line_to_type[i + 1].isalnum()
+                    and char != line_to_type[i + 1]
+                    and i > 2
+                    and random.random() < 0.015
+                )
+
+                should_typo = (
+                    not can_swap
+                    and use_typos
                     and human_level >= 2
                     and random.random() < 0.03
                     and char.isalnum()
                     and i < len(line_to_type) - 5
                     and i > 5
                 )
+
+                if can_swap:
+                    next_char = line_to_type[i + 1]
+                    self._debug(
+                        f"type swap error {char!r}<->{next_char!r} line_idx={line_idx} char_idx={i}"
+                    )
+                    # Type in wrong order
+                    self._pg_write(next_char, interval=0)
+                    self._pg_write(char, interval=0)
+                    # Reaction "oops" delay before correcting
+                    time.sleep(max(0.1, random.gauss(0.35, 0.08)))
+                    self._pg_press("backspace")
+                    time.sleep(random.uniform(0.05, 0.12))
+                    self._pg_press("backspace")
+                    time.sleep(random.uniform(0.08, 0.15))
+                    # Retype in correct order
+                    self._pg_write(char, interval=0)
+                    self._pg_write(next_char, interval=0)
+
+                    chars_typed += 2
+                    prev_char = next_char
+                    fatigue_multiplier *= _FATIGUE_FACTOR
+                    fatigue_multiplier *= _FATIGUE_FACTOR
+
+                    progress = int((chars_typed / total_chars) * 100)
+                    self._on_status(f"⌨️ Typing... {progress}% complete")
+
+                    delay = self._get_char_delay(
+                        wpm, use_variation, human_level,
+                        prev_char=char, current_char=next_char,
+                        current_word=current_word,
+                        fatigue_multiplier=fatigue_multiplier,
+                    )
+                    time.sleep(delay)
+                    i += 2
+                    continue
 
                 if should_typo:
                     correct_char = char
@@ -226,30 +426,49 @@ class TypingEngine:
                     else:
                         wrong_char = random.choice("abcdefghijklmnopqrstuvwxyz")
 
-                    pyautogui.PAUSE = 0
-                    pyautogui.write(wrong_char, interval=0)
-                    time.sleep(random.uniform(0.05, 0.15))
-                    time.sleep(random.uniform(0.3, 0.7))
-                    pyautogui.press("backspace")
+                    self._debug(
+                        f"type typo wrong_char={wrong_char!r} line_idx={line_idx} char_idx={i}"
+                    )
+                    self._pg_write(wrong_char, interval=0)
+                    # Reaction "oops" delay
+                    time.sleep(max(0.1, random.gauss(0.35, 0.08)))
+                    self._debug("press backspace for typo correction")
+                    self._pg_press("backspace")
                     time.sleep(random.uniform(0.1, 0.2))
-                    pyautogui.PAUSE = 0
-                    pyautogui.write(correct_char, interval=0)
+                    self._debug(
+                        f"type corrected_char={correct_char!r} line_idx={line_idx} char_idx={i}"
+                    )
+                    self._pg_write(correct_char, interval=0)
                 else:
-                    pyautogui.PAUSE = 0
-                    pyautogui.write(char, interval=0)
+                    self._debug(
+                        f"type char={char!r} line_idx={line_idx} char_idx={i}"
+                    )
+                    self._pg_write(char, interval=0)
 
                 chars_typed += 1
+                fatigue_multiplier *= _FATIGUE_FACTOR
                 progress = int((chars_typed / total_chars) * 100)
                 self._on_status(f"⌨️ Typing... {progress}% complete")
 
-                delay = self._get_char_delay(wpm, use_variation, human_level)
+                delay = self._get_char_delay(
+                    wpm, use_variation, human_level,
+                    prev_char=prev_char, current_char=char,
+                    current_word=current_word,
+                    fatigue_multiplier=fatigue_multiplier,
+                )
                 if use_punctuation:
                     if char in ".!?":
                         delay += random.uniform(0.3, 0.8) * human_level
                     elif char in ",;:":
                         delay += random.uniform(0.15, 0.4) * human_level
 
-                if use_thinking:
+                # Word-boundary micro-pause after spaces
+                if char == " ":
+                    wb_pause = random.gauss(0.25, 0.05)
+                    wb_pause = max(0.05, min(0.6, wb_pause))
+                    time.sleep(wb_pause)
+                    chars_since_pause = 0
+                elif use_thinking:
                     chars_since_pause += 1
                     pause_threshold = random.randint(15, 40)
                     if chars_since_pause > pause_threshold:
@@ -266,6 +485,7 @@ class TypingEngine:
                     delay *= random.uniform(0.4, 0.7)
 
                 time.sleep(delay)
+                prev_char = char
                 i += 1
 
             if line_idx < len(lines) - 1:
@@ -273,22 +493,26 @@ class TypingEngine:
                 next_line = lines[line_idx + 1]
                 next_is_list = self._is_list_marker(next_line)
                 if is_list_item and not next_is_list:
-                    pyautogui.press("enter")
+                    self._debug("press enter (list spacing 1)")
+                    self._pg_press("enter")
                     time.sleep(0.15)
-                    pyautogui.press("enter")
+                    self._debug("press enter (list spacing 2)")
+                    self._pg_press("enter")
                     time.sleep(0.2)
                 else:
-                    pyautogui.press("enter")
+                    self._debug("press enter (line break)")
+                    self._pg_press("enter")
                     time.sleep(random.uniform(0.2, 0.4))
+                prev_char = ""
+        self._debug("type_text completed")
 
     def type_spreadsheet(self, rows: List[List[str]]) -> None:
         """
-        Type spreadsheet data cell by cell: pyautogui.write only, then Tab or Enter.
+        Type spreadsheet data cell by cell via _pg_write, then Tab or Enter.
         No clipboard, hotkeys, Cmd keys, or arrow keys — avoids macOS dictation
         and shortcut side effects from synthetic modifier combinations.
         Uses should_stop / is_paused / on_status callables if provided.
         """
-        pyautogui.PAUSE = 0
         cfg = self.config
         countdown = cfg.countdown_seconds
 
@@ -317,7 +541,7 @@ class TypingEngine:
 
                 cell_content = str(cell).strip()
                 if cell_content:
-                    pyautogui.write(cell_content, interval=0.05)
+                    self._pg_write(cell_content, interval=0.05)
 
                 cells_typed += 1
                 progress = int((cells_typed / total_cells) * 100)
@@ -331,7 +555,7 @@ class TypingEngine:
                 )
                 if not is_last_cell:
                     if col_idx < len(row) - 1:
-                        pyautogui.press("tab")
+                        self._pg_press("tab")
                     else:
-                        pyautogui.press("enter")
+                        self._pg_press("enter")
                     time.sleep(0.05)

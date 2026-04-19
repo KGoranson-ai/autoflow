@@ -1,13 +1,12 @@
 """
-Minimal test: instantiate TypingEngine with default config and verify it doesn't crash on a short string.
-Mocks pyautogui so no real keystrokes are sent.
+Minimal TypingEngine tests.
+Uses the engine's emit hooks so no real keystrokes are sent.
 Run from project root: PYTHONPATH=src python3 -m pytest tests/test_typing_engine.py
 Or with unittest: PYTHONPATH=src python3 tests/test_typing_engine.py
 """
 
 import sys
 import unittest
-from unittest.mock import patch, MagicMock
 
 # Ensure src is on path when run as script
 if __name__ == "__main__":
@@ -36,15 +35,62 @@ class TestTypingEngine(unittest.TestCase):
         self.assertFalse(engine.config.speed_variation)
         self.assertFalse(engine.config.typos_enabled)
 
-    @patch("typing_engine.pyautogui.press")
-    @patch("typing_engine.pyautogui.write")
-    def test_type_text_does_not_crash_on_short_string(self, mock_write, mock_press):
-        """Instantiate engine and call type_text with a short string; should not raise."""
-        config = TypingConfig(countdown_seconds=0)
-        engine = TypingEngine(config)
+    def test_type_text_emits_characters_without_real_keystrokes(self):
+        emitted_chars = []
+        emitted_keys = []
+        config = TypingConfig(
+            countdown_seconds=0,
+            speed_variation=False,
+            thinking_pauses=False,
+            punctuation_pauses=False,
+            typos_enabled=False,
+        )
+        engine = TypingEngine(
+            config,
+            emit_character=emitted_chars.append,
+            emit_key=emitted_keys.append,
+        )
+
         engine.type_text("hi")
-        # Engine should have written at least the two characters
-        self.assertGreaterEqual(mock_write.call_count, 2)
+
+        self.assertEqual("".join(emitted_chars), "hi")
+        self.assertEqual(emitted_keys, [])
+
+    def test_type_text_emits_enter_for_newline(self):
+        emitted_chars = []
+        emitted_keys = []
+        config = TypingConfig(
+            countdown_seconds=0,
+            speed_variation=False,
+            thinking_pauses=False,
+            punctuation_pauses=False,
+            typos_enabled=False,
+        )
+        engine = TypingEngine(
+            config,
+            emit_character=emitted_chars.append,
+            emit_key=emitted_keys.append,
+        )
+
+        engine.type_text("a\nb")
+
+        self.assertEqual("".join(emitted_chars), "ab")
+        self.assertEqual(emitted_keys, ["enter"])
+
+    def test_type_spreadsheet_emits_tab_and_enter_navigation(self):
+        emitted_chars = []
+        emitted_keys = []
+        config = TypingConfig(countdown_seconds=0)
+        engine = TypingEngine(
+            config,
+            emit_character=emitted_chars.append,
+            emit_key=emitted_keys.append,
+        )
+
+        engine.type_spreadsheet([["A1", "B1"], ["A2", "B2"]])
+
+        self.assertEqual("".join(emitted_chars), "A1B1A2B2")
+        self.assertEqual(emitted_keys, ["tab", "enter", "tab"])
 
 
 if __name__ == "__main__":

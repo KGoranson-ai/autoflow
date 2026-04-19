@@ -76,6 +76,7 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with real secrets (never commit .env)
+alembic upgrade head
 ```
 
 Run locally:
@@ -97,10 +98,21 @@ gunicorn app:app --bind 127.0.0.1:5001
 | Variable | Purpose |
 |----------|---------|
 | `DATABASE_URL` | PostgreSQL connection string (for future use) |
+| `REDIS_URL` | Redis URL for shared production rate limiting |
+| `RATE_LIMIT_STORAGE_URI` | Optional Flask-Limiter storage URI override |
+| `AUTO_INIT_DB` | Local/dev fallback to create tables at request startup; use `0` in production |
 | `STRIPE_SECRET_KEY` | Stripe secret key |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
+| `STRIPE_PRICE_SOLO` | Stripe monthly price ID for Solo |
+| `STRIPE_PRICE_PRO` | Stripe monthly price ID for Pro |
+| `STRIPE_PRICE_TEAM` | Stripe monthly price ID for Team |
+| `STRIPE_PRICE_SOLO_ANNUAL` | Stripe annual price ID for Solo |
+| `STRIPE_PRICE_PRO_ANNUAL` | Stripe annual price ID for Pro |
+| `STRIPE_PRICE_TEAM_ANNUAL` | Stripe annual price ID for Team |
+| `RESEND_API_KEY` | Resend API key for trial/license emails |
 | `SECRET_KEY` | Flask session / signing |
 | `LICENSE_SALT` | Salt for license material (future validation) |
+| `ADMIN_SECRET` | Secret required in `X-Admin-Secret` for admin endpoints |
 | `DOWNLOAD_URL` | URL returned by `GET /api/version` |
 | `CORS_ORIGINS` | Comma-separated allowed origins (defaults include `https://typestra.com` and local dev) |
 | `PORT` | Listen port (set automatically on Railway) |

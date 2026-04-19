@@ -35,8 +35,6 @@ TIER_FEATURES: dict[str, list[str]] = {
     "solo":  ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile"],
     "pro":   ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile",
               "ocr", "auto_calculations", "multi_device"],
-    "pro_plus": ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile",
-                 "ocr", "auto_calculations", "multi_device", "multi_form"],
     "team":  ["text_blocks", "shortcuts", "spreadsheet_mode", "multi_profile",
               "ocr", "auto_calculations", "multi_device",
               "multi_form", "scheduled_scripts", "team_management", "dedicated_support"],
@@ -44,6 +42,18 @@ TIER_FEATURES: dict[str, list[str]] = {
 
 # Which features are reserved for paid tiers (vs. trial)
 PAID_TIER_FEATURES = {"pro", "team"}
+
+LEGACY_TIER_ALIASES = {
+    "basic": "solo",
+    "premium": "team",
+}
+
+
+def _canonical_tier(tier: Optional[str]) -> Optional[str]:
+    if tier is None:
+        return None
+    normalized = str(tier).strip().lower()
+    return LEGACY_TIER_ALIASES.get(normalized, normalized)
 
 
 @dataclass
@@ -60,16 +70,16 @@ class LicenseInfo:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def is_pro_plus(self) -> bool:
-        """Return True if the license tier is pro_plus or team."""
-        return self.tier in ("pro_plus", "team")
+    def is_team(self) -> bool:
+        """Return True if the license tier is team."""
+        return self.tier == "team"
 
     def is_multi_form_allowed(self) -> bool:
         """
         Return True if multi-form fill is available for this license.
-        Requires Pro+ or Team tier with a valid, non-expired license.
+        Requires Team tier with a valid, non-expired license.
         """
-        return self.valid and self.is_pro_plus() and "multi_form" in self.features
+        return self.valid and self.is_team() and "multi_form" in self.features
 
     @staticmethod
     def invalid(error: str = "No license") -> "LicenseInfo":
@@ -88,7 +98,7 @@ class LicenseInfo:
     def from_dict(d: dict) -> "LicenseInfo":
         return LicenseInfo(
             valid=d.get("valid", False),
-            tier=d.get("tier"),
+            tier=_canonical_tier(d.get("tier")),
             expires=d.get("expires"),
             is_trial=d.get("is_trial", False),
             trial_end=d.get("trial_end"),
@@ -190,7 +200,7 @@ class LicenseManager:
                     logger.info("Trial expired (local check), showing upgrade prompt")
                     expired_info = LicenseInfo(
                         valid=False,
-                        tier=info.trial_end,
+                        tier=info.tier,
                         expires=info.trial_end,
                         is_trial=True,
                         trial_end=info.trial_end,
@@ -207,6 +217,17 @@ class LicenseManager:
                 pass
         return info
 
+    def get_license_info(self, force: bool = False) -> LicenseInfo:
+        """
+        Return the current license state for feature gates.
+
+        This is the public helper UI modules should use when passing license
+        state into gated features such as OCR and multi-form fill.
+        """
+        if force:
+            self._invalidate_cache()
+        return self.validate_and_check_trial()
+
     # ── feature gating ───────────────────────────────────────────────────────
 
     def has_feature(self, feature: str, license_info: Optional[LicenseInfo] = None) -> bool:
@@ -216,7 +237,7 @@ class LicenseManager:
             return False
         return feature in info.features
 
-    def is_pro_plus(self, license_info: Optional[LicenseInfo] = None) -> bool:
+    def is_pro_or_team(self, license_info: Optional[LicenseInfo] = None) -> bool:
         """True for Pro or Team tiers."""
         info = license_info or self.validate()
         return info.valid and info.tier in {"pro", "team"}
@@ -283,7 +304,7 @@ class LicenseManager:
 
         # Parse response
         valid = bool(data.get("valid", False))
-        tier = data.get("tier")
+        tier = _canonical_tier(data.get("tier"))
         expires = data.get("expires")
         is_trial = bool(data.get("is_trial", False))
 

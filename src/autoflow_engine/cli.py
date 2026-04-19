@@ -6,8 +6,6 @@ with --text runs typing; without --text tries to launch the GUI (when available)
 import argparse
 import sys
 
-import pyautogui
-
 from autoflow_engine import TypingConfig, TypingEngine
 
 
@@ -80,8 +78,6 @@ def main() -> None:
         try:
             engine.type_text(args.text)
             print("Typing complete.")
-        except pyautogui.FailSafeException:
-            print("Emergency stop - mouse moved to corner.")
         except KeyboardInterrupt:
             print("Interrupted.")
     else:

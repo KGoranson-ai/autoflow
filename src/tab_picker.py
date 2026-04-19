@@ -314,7 +314,7 @@ class TabPickerDialog(tk.Toplevel):
         parent:          Parent Tk window.
         rows:            CSV rows to type (same rows sent to every session).
         browser_type:    Canonical browser key — passed to TabInjector.
-        license_info:    LicenseInfo object for the Pro+ gate.
+        license_info:    LicenseInfo object for the Team gate.
         on_run:          Called with a configured SessionManager when Run All fires.
         num_form_slots:  How many drop zones to show (default 5).
     """
@@ -367,7 +367,7 @@ class TabPickerDialog(tk.Toplevel):
         ).pack(side="left")
         tk.Label(
             header,
-            text="Pro+",
+            text="Team",
             bg="#FF9F0A", fg="#000000",
             font=("Helvetica", 9, "bold"),
             padx=6, pady=2,
