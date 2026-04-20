@@ -87,6 +87,24 @@ export PORT=5001
 python app.py
 ```
 
+## Desktop Release Builds
+
+macOS:
+
+```bash
+CREATE_DMG=1 ./build_mac.sh
+```
+
+Windows must be built on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
+```
+
+The Windows build outputs `dist\typestra-latest-win.exe`. The GitHub Actions
+workflow `Build Windows App` can also be run manually and uploads the same file
+as a build artifact.
+
 Or with Gunicorn (matches production):
 
 ```bash

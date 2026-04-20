@@ -1,0 +1,42 @@
+name: Build Windows App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "resources/**"
+      - "requirements-desktop.txt"
+      - "typestra_windows.spec"
+      - "build_windows.ps1"
+      - "pyi_rth_autoflow_tesseract.py"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build executable
+        shell: pwsh
+        run: .\build_windows.ps1 -Python python
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: typestra-latest-win
+          path: dist/typestra-latest-win.exe
+          if-no-files-found: error

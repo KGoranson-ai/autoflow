@@ -9,3 +9,6 @@ pdf2image>=1.17.0
 requests>=2.32.3,<3
 pandas>=2.0.0
 cryptography>=43.0.0,<47
+psutil>=5.9.8; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"
+pywinauto>=0.6.8; sys_platform == "win32"
