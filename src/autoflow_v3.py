@@ -741,15 +741,18 @@ class Typestra:
         button_frame.columnconfigure(1, weight=2)
 
         _start_tip = "⌘+Enter: Start typing" if self._is_mac else "Ctrl+Enter: Start typing"
+        start_bg = "#D7EBFF" if self._is_mac else "#0057B8"
+        start_fg = "#111111" if self._is_mac else "#FFFFFF"
+        start_active_bg = "#B8DCFF" if self._is_mac else "#004A9F"
         self.start_button = tk.Button(
             button_frame,
             text="Start Typestra",
             command=self.start_typing,
-            bg="#0A84FF",
-            fg="#FFFFFF",
-            activebackground="#006EDB",
-            activeforeground="#FFFFFF",
-            disabledforeground="#D0D0D0",
+            bg=start_bg,
+            fg=start_fg,
+            activebackground=start_active_bg,
+            activeforeground=start_fg,
+            disabledforeground="#555555",
             relief="flat",
             font=("Arial", 11, "bold"),
             padx=12,
@@ -2359,6 +2362,38 @@ Emergency Stop: Move mouse to top-left corner."""
         self.listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.listener.daemon = True
         self.listener.start()
+
+    def _run_on_ui_thread(self, func):
+        """Run a small callable on Tk's main thread and wait for the result."""
+        if threading.current_thread() is threading.main_thread():
+            return func()
+
+        done = threading.Event()
+        result = {}
+
+        def _wrapped():
+            try:
+                result["value"] = func()
+            except BaseException as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+        self.root.after(0, _wrapped)
+        done.wait()
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    def _emit_character_on_ui_thread(self, ch: str) -> None:
+        """Emit keystrokes from Tk's main thread to avoid macOS native input crashes."""
+        if not ch:
+            return
+        self._run_on_ui_thread(lambda: pyautogui.write(ch, interval=0))
+
+    def _emit_key_on_ui_thread(self, key: str) -> None:
+        """Emit special keys from Tk's main thread."""
+        self._run_on_ui_thread(lambda: pyautogui.press(key))
     
     def _run_type_text(self, text: str) -> None:
         """Thread target: build config, run TypingEngine.type_text, then reset UI."""
@@ -2377,6 +2412,8 @@ Emergency Stop: Move mouse to top-left corner."""
             should_stop=lambda: self.should_stop,
             is_paused=lambda: self.is_paused,
             on_status=lambda s: self.root.after(0, lambda: self.status_label.config(text=s)),
+            emit_character=self._emit_character_on_ui_thread,
+            emit_key=self._emit_key_on_ui_thread,
         )
         try:
             engine.type_text(text)
@@ -2426,6 +2463,8 @@ Emergency Stop: Move mouse to top-left corner."""
             should_stop=lambda: self.should_stop,
             is_paused=lambda: self.is_paused,
             on_status=lambda s: self.root.after(0, lambda: self.status_label.config(text=s)),
+            emit_character=self._emit_character_on_ui_thread,
+            emit_key=self._emit_key_on_ui_thread,
         )
         try:
             engine.type_spreadsheet(rows)
