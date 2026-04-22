@@ -291,6 +291,24 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         process.assert_called_once_with(event["data"]["object"])
 
+    def test_stripe_webhook_accepts_legacy_webhook_route(self):
+        event = {
+            "type": "checkout.session.completed",
+            "data": {"object": {"metadata": {}, "customer_details": {"email": "a@b.com"}}},
+        }
+
+        with patch.dict(backend_app.os.environ, {"STRIPE_WEBHOOK_SECRET": "whsec"}, clear=True):
+            with patch.object(backend_app.stripe.Webhook, "construct_event", return_value=event):
+                with patch.object(backend_app, "_process_checkout_completed") as process:
+                    response = self.client.post(
+                        "/webhook",
+                        data=b"{}",
+                        headers={"Stripe-Signature": "sig"},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        process.assert_called_once_with(event["data"]["object"])
+
     def test_stripe_webhook_returns_error_for_missing_secret(self):
         with patch.dict(backend_app.os.environ, {}, clear=True):
             response = self.client.post("/api/webhook/stripe", data=b"{}")

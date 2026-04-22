@@ -644,6 +644,7 @@ def create_app() -> Flask:
             logger.error(f"Convert trial request error: {e}")
             return jsonify({"error": "Invalid request"}), 400
 
+    @app.route("/webhook", methods=["POST"])
     @app.route("/api/webhook/stripe", methods=["POST"])
     def stripe_webhook():
         payload = request.get_data()
