@@ -309,6 +309,28 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         process.assert_called_once_with(event["data"]["object"])
 
+    def test_stripe_webhook_retries_checkout_processing_errors(self):
+        event = {
+            "type": "checkout.session.completed",
+            "data": {"object": {"metadata": {}, "customer_details": {"email": "a@b.com"}}},
+        }
+
+        with patch.dict(backend_app.os.environ, {"STRIPE_WEBHOOK_SECRET": "whsec"}, clear=True):
+            with patch.object(backend_app.stripe.Webhook, "construct_event", return_value=event):
+                with patch.object(
+                    backend_app,
+                    "_process_checkout_completed",
+                    side_effect=RuntimeError("email failed"),
+                ):
+                    response = self.client.post(
+                        "/api/webhook/stripe",
+                        data=b"{}",
+                        headers={"Stripe-Signature": "sig"},
+                    )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["error"], "Webhook processing failed")
+
     def test_stripe_webhook_returns_error_for_missing_secret(self):
         with patch.dict(backend_app.os.environ, {}, clear=True):
             response = self.client.post("/api/webhook/stripe", data=b"{}")

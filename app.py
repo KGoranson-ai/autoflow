@@ -252,8 +252,8 @@ def _process_checkout_completed(session_data: dict) -> None:
                 stripe_customer_id=stripe_customer_id,
                 amount_total=amount_total,
             )
-            s.commit()
             _send_trial_converted_email(email)
+            s.commit()
             logger.info(f"Trial converted for {email}")
             return
 
@@ -273,8 +273,8 @@ def _process_checkout_completed(session_data: dict) -> None:
             stripe_customer_id=stripe_customer_id,
             amount_total=amount_total,
         )
-        s.commit()
         _send_license_email(email, license_key)
+        s.commit()
         logger.info(f"License created and emailed to {email}")
     except Exception:
         s.rollback()
@@ -673,6 +673,7 @@ def create_app() -> Flask:
                 _process_checkout_completed(session_data)
             except Exception as e:
                 logger.error(f"Webhook processing error: {e}")
+                return jsonify({"error": "Webhook processing failed"}), 500
 
         return jsonify({"status": "ok"}), 200
 
