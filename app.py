@@ -294,6 +294,8 @@ def create_app() -> Flask:
         key_func=get_remote_address,
         default_limits=["200 per day"],
         storage_uri=_rate_limit_storage_uri(),
+        in_memory_fallback_enabled=True,
+        swallow_errors=True,
     )
 
     raw_cors_origins = os.environ.get(
